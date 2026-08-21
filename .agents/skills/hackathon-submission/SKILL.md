@@ -15,11 +15,12 @@ Treat the organizer's confirmed requirements as hard acceptance criteria through
 4. Read [references/healthbench-overview.md](references/healthbench-overview.md) before benchmark interpretation, evaluation analysis, prompt-quality strategy, or model-quality decisions. Preserve its anti-reverse-engineering boundary.
 5. Read [references/simple-evals-reference.md](references/simple-evals-reference.md) before changing the evaluator adapter, response strategy, score interpretation, HealthBench experiments, or RAG/harness architecture.
 6. Read [references/advanced-harness-design.md](references/advanced-harness-design.md) before implementing or materially changing conversation-state compilation, execution lanes, retrieval routing, evidence verification, review/revision, observability, or the harness experiment plan.
-7. Read [references/l2-usage-guide.md](references/l2-usage-guide.md) before designing or changing L2 prompts, retrieval/generation orchestration, MCP exposure, citations, or multi-turn handling.
-8. Read [references/api-and-patient-simulator.md](references/api-and-patient-simulator.md) before implementing L2 API calls, authentication, environment configuration, Patient Simulator tests, or retry behavior.
-9. Read [references/mcp-tool-guide.md](references/mcp-tool-guide.md) before configuring MCP, selecting retrieval tools or data sources, implementing the MCP client, or changing retrieval routing.
-10. Read [references/submission-spec.md](references/submission-spec.md) before changing the service boundary, API behavior, Docker setup, branch strategy, evaluation flow, or submission process.
-11. Re-read all ten references before claiming the project is ready for evaluation or final submission.
+7. Read [references/literature-synthesis.md](references/literature-synthesis.md) before adopting an agent role, clinical schema, retrieval loop, confidence mechanism, safety gate, response verifier, source-curation policy, or paper-reported benchmark result.
+8. Read [references/l2-usage-guide.md](references/l2-usage-guide.md) before designing or changing L2 prompts, retrieval/generation orchestration, MCP exposure, citations, or multi-turn handling.
+9. Read [references/api-and-patient-simulator.md](references/api-and-patient-simulator.md) before implementing L2 API calls, authentication, environment configuration, Patient Simulator tests, or retry behavior.
+10. Read [references/mcp-tool-guide.md](references/mcp-tool-guide.md) before configuring MCP, selecting retrieval tools or data sources, implementing the MCP client, or changing retrieval routing.
+11. Read [references/submission-spec.md](references/submission-spec.md) before changing the service boundary, API behavior, Docker setup, branch strategy, evaluation flow, or submission process.
+12. Re-read all eleven references before claiming the project is ready for evaluation or final submission.
 
 ## Maintain the project knowledge
 

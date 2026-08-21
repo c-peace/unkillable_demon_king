@@ -10,6 +10,18 @@ Status: target architecture inferred from organizer rules, L2 guidance, MCP capa
 
 The target is a risk-adaptive state machine, not an unconstrained agent loop and not an always-on RAG pipeline.
 
+## Literature-driven refinements
+
+The five-paper review in `literature-synthesis.md` adds the following requirements to this target:
+
+- The conversation compiler must produce both a clinical schema and an interaction-intent schema, each linked to source turns.
+- Retrieval must track explicit claims and named evidence gaps, with sufficiency-driven early stopping rather than a fixed number of searches.
+- The evidence packet must include conflicts and unresolved claims, not only selected supporting snippets.
+- A high-risk reviewer must inspect the final answer against a dual-track response contract: grounded clinical requirements plus user/context requirements.
+- Retrieval similarity, source tier, and `relevance_score` must never be presented as answer confidence; confidence language must come from answer-level support and unresolved uncertainty.
+- Corpus/source routing must be purpose- and jurisdiction-aware while final generation separately protects communication quality.
+- Safety gates, specialty routing, response-length control, and review depth must remain conditional and ablatable; paper-reported benchmark-specific configurations are not defaults.
+
 ## Non-negotiable constraints
 
 - The service is OpenAI-compatible and uses the request `messages` as the authoritative conversation state.
@@ -112,9 +124,32 @@ The controller selects a lane and, when grounding is required, creates atomic cl
 - preferred source families;
 - maximum retrieval and review budget.
 
+Maintain the plan as a dual-track response contract:
+
+- **Clinical/evidence track:** supported facts, contraindications, red flags, uncertainty, actions, and claims requiring retrieval.
+- **Interaction/context track:** actual user intent, expertise, requested format, missing context, language, geography, resources, and tone.
+
 Do not expose this internal plan or chain-of-thought to the user. Prefer a structured terminal tool/schema over free-form planning text if L2's tool-calling API proves reliable.
 
 Start with the generation L2's native decision to call `retrieve_relevant_content`. An explicit controller call is an optional advanced module and must demonstrate better aggregate quality than its added latency and failure surface.
+
+### Evidence Requirement Ledger
+
+Implement SEMA-RAG's interpretation, exploration, and adjudication logic without defaulting to three separate model agents. A single retrieval-stage L2 can perform those roles sequentially across tool turns while the harness persists a validated request-local ledger:
+
+```text
+EvidenceRequirement
+  id
+  claim_or_question
+  source_preference
+  clinical_constraints
+  criticality
+  status: missing | supported | contradicted | unresolved
+  cite_uids
+  gap_reason
+```
+
+The ledger is harness state, not free-form model memory. Retrieval L2 may propose updates, but the harness validates identifiers and retains prior results. This preserves gap awareness across rounds without multiplying agents or relying on hidden chain-of-thought.
 
 ## 3. Claim-driven adaptive RAG
 
@@ -154,6 +189,7 @@ Choose the production default only after measuring tool-call validity, evidence 
 - Retrieval gathers evidence but never writes the final user answer.
 - Enforce configurable limits for L2 rounds, MCP calls, per-tool timeout, total deadline, result size, and retry count.
 - Accept the first valid `finalize_retrieval` terminal call.
+- After each retrieval round, label every required claim as supported, contradicted, or missing; issue a follow-up query only for a named gap.
 - If the model does not finalize, deterministically return `partial` when usable citable evidence exists, otherwise `no_evidence`.
 - Retry only transient failures; do not retry validation/schema errors indefinitely.
 
@@ -171,6 +207,10 @@ During retrieval, store every citable result in a request-local registry keyed b
 When retrieval ends, resolve selected `cite_uid` values against this registry and send only the compact selected evidence packet to generation. Reject or ignore unknown identifiers. Do not dump raw tool traces or entire documents into the generation context.
 
 The `relevance_score` is a selection hint, not clinical confidence or proof strength.
+
+Do not expose a numeric answer-confidence score derived only from retrieval similarity, source quality, or corroboration count. Those signals describe the evidence set, not whether generation used it correctly or covered the user's needs.
+
+Before accepting `status="sufficient"`, verify that every critical ledger item is either supported or explicitly represented as a genuine unresolved conflict, all selected `cite_uid` values exist in the registry, source applicability is appropriate, and selected evidence is not redundant. The free-form `note` may summarize conflicts and applicability for generation, but it does not replace the structured ledger or evidence registry.
 
 ## 5. Evidence verification
 
@@ -301,4 +341,3 @@ Even with ample development time, keep every layer independently testable and re
 - public internet dependencies in the evaluation path;
 - an always-on multi-draft or self-critique loop without measured benefit;
 - benchmark-specific branches, case templates, or grader emulation.
-
