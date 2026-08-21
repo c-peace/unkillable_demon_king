@@ -31,6 +31,11 @@ VALID_TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 # material while consuming the whole tool-call budget.
 MAX_CALLS_PER_TOOL = 2
 
+# Consecutive tool calls returning no citable evidence before retrieval is pushed to
+# finalize. The organizers warn that a model floundering over tool calls is what
+# produces very long timeouts, so stalling has to end the loop rather than extend it.
+MAX_NO_PROGRESS_CALLS = 2
+
 
 FINALIZE_RETRIEVAL_TOOL: dict[str, Any] = {
     "type": "function",
@@ -103,6 +108,52 @@ def _tool_cache_key(name: str, arguments: Mapping[str, Any]) -> str:
         separators=(",", ":"),
         sort_keys=True,
     )
+
+
+_STOPWORDS = frozenset(
+    "a an and are as at be by для for from in is of on or that the to what when with "
+    "관한 그리고 대한 대해 또는 및 에서 으로 은 는 이 가 을 를 의 와 과 에".split()
+)
+
+
+# Korean attaches its particles to the word, so "트라스투주맙" and "트라스투주맙의" are one
+# term written twice. Longest first so 에서 is not shortened to 서 by an earlier match.
+_KO_PARTICLES = (
+    "에서는", "에게서", "으로는", "이라는", "에서", "에게", "한테", "부터", "까지",
+    "으로", "라는", "이나", "에는", "은", "는", "이", "가", "을", "를", "의",
+    "와", "과", "로", "도", "만", "에",
+)
+
+
+def _strip_particle(token: str) -> str:
+    if not token or not ("가" <= token[-1] <= "힣"):
+        return token
+    for particle in _KO_PARTICLES:
+        if len(token) > len(particle) + 1 and token.endswith(particle):
+            return token[: -len(particle)]
+    return token
+
+
+def _semantic_call_key(name: str, arguments: Mapping[str, Any]) -> str:
+    """Collapse a tool call to what it is actually asking for.
+
+    The model rewords the same search rather than moving on — "warfarin ibuprofen
+    interaction", "ibuprofen interaction with warfarin", "warfarin and ibuprofen adverse
+    interaction" are one search, and running all three costs the budget that a genuinely
+    different search needed. Lowercasing, dropping punctuation and stopwords, and sorting
+    the remaining tokens makes those three collapse to the same key.
+    """
+    parts: list[str] = []
+    for key in sorted(arguments):
+        value = arguments[key]
+        if isinstance(value, str):
+            tokens = [t for t in re.split(r"[^0-9a-z가-힣]+", value.lower()) if t]
+            tokens = [_strip_particle(t) for t in tokens]
+            tokens = [t for t in tokens if t not in _STOPWORDS and len(t) > 1]
+            parts.append(f"{key}={' '.join(sorted(set(tokens)))}")
+        elif value is not None:
+            parts.append(f"{key}={value}")
+    return f"{name}|" + "|".join(parts)
 
 
 def _candidate_records(value: Any) -> tuple[Mapping[str, Any], ...]:
@@ -420,6 +471,10 @@ class RetrievalEngine:
         # The deterministic page bridge is our own chaining, not the model spending its
         # budget, so it is counted separately and reported without charging the model.
         bridge_calls = 0
+        seen_semantic: set[str] = set()
+        duplicate_blocked = 0
+        invalid_calls = 0
+        no_progress = 0
 
         while model_rounds < self._settings.max_retrieval_model_rounds:
             if not deadline.can_start(0.25):
@@ -432,6 +487,9 @@ class RetrievalEngine:
                 not mcp_budget_exhausted
                 and mcp_calls < self._settings.max_mcp_tool_calls
                 and model_rounds < self._settings.max_retrieval_model_rounds - 1
+                # Two searches in a row returning nothing citable means this line of enquiry
+                # is not paying off; more of it burns the budget and the clock.
+                and no_progress < MAX_NO_PROGRESS_CALLS
             )
             round_tools = (
                 retrieval_tools
@@ -520,6 +578,7 @@ class RetrievalEngine:
 
                 tool = tool_by_name.get(call.name)
                 if tool is None:
+                    invalid_calls += 1
                     messages.append(
                         {
                             "role": "tool",
@@ -567,6 +626,7 @@ class RetrievalEngine:
                 try:
                     arguments = parse_tool_arguments(call.arguments)
                 except (ValueError, json.JSONDecodeError):
+                    invalid_calls += 1
                     messages.append(
                         {
                             "role": "tool",
@@ -576,6 +636,7 @@ class RetrievalEngine:
                     )
                     continue
                 cache_key = _tool_cache_key(tool.name, arguments)
+                semantic_key = _semantic_call_key(tool.name, arguments)
                 cached = tool_cache.get(cache_key)
                 if cached is not None:
                     LOGGER.info("retrieval_tool_cache_hit tool=%s", tool.name)
@@ -587,6 +648,34 @@ class RetrievalEngine:
                         }
                     )
                     continue
+                if semantic_key in seen_semantic:
+                    # Same search, different wording. Running it again costs a tool call and
+                    # returns what we already hold, so refuse and push toward finalizing.
+                    duplicate_blocked += 1
+                    LOGGER.info(
+                        "retrieval_duplicate_blocked tool=%s total=%s",
+                        tool.name,
+                        duplicate_blocked,
+                    )
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": call.id,
+                            "content": json.dumps(
+                                {
+                                    "error": "already_searched",
+                                    "instruction": (
+                                        "You already ran this search. Use the evidence you "
+                                        "have, search a genuinely different evidence need, "
+                                        "or call finalize_retrieval now."
+                                    ),
+                                },
+                                ensure_ascii=False,
+                            ),
+                        }
+                    )
+                    continue
+                seen_semantic.add(semantic_key)
                 try:
                     result = self._mcp.call_tool(
                         tool.name,
@@ -596,6 +685,13 @@ class RetrievalEngine:
                     mcp_calls += 1
                     tool_use_counts[tool.name] = used_before + 1
                     cite_uids = registry.register_payload(result, source_tool=tool.name)
+                    # index discovery legitimately returns candidates rather than citable
+                    # evidence and the bridge below turns it into pages, so it is not a
+                    # stall. Any other tool that yields nothing is.
+                    if cite_uids or tool.name == "index_get_relevant_nodes":
+                        no_progress = 0
+                    else:
+                        no_progress += 1
                     LOGGER.info(
                         "retrieval_tool_completed tool=%s call=%s citations=%s",
                         tool.name,
@@ -755,6 +851,12 @@ class RetrievalEngine:
             if should_stop_after_turn:
                 break
 
+        LOGGER.info(
+            "retrieval_guard rounds=%s mcp_calls=%s bridge_calls=%s duplicates=%s "
+            "invalid=%s no_progress=%s",
+            model_rounds, mcp_calls, bridge_calls, duplicate_blocked,
+            invalid_calls, no_progress,
+        )
         if mcp_budget_exhausted:
             note = "Retrieval ended because the MCP tool-call budget was exhausted."
         elif model_rounds >= self._settings.max_retrieval_model_rounds:
