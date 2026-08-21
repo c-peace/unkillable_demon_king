@@ -101,6 +101,8 @@ class Settings:
     l2_retries: int = 1
     empty_output_retries: int = 1
     l2_max_tokens: int = 4_096
+    l2_temperature: float = 0.0
+    l2_top_p: float = 1.0
     max_generation_retrievals: int = 2
     max_retrieval_model_rounds: int = 4
     max_mcp_tool_calls: int = 4
@@ -171,6 +173,12 @@ class Settings:
                 4_096,
                 minimum=256,
                 maximum=32_768,
+            ),
+            l2_temperature=_as_float(
+                source.get("L2_TEMPERATURE"), 0.0, minimum=0.0, maximum=2.0
+            ),
+            l2_top_p=_as_float(
+                source.get("L2_TOP_P"), 1.0, minimum=0.0, maximum=1.0
             ),
             max_generation_retrievals=_as_int(
                 source.get("MAX_GENERATION_RETRIEVALS"), 2, minimum=0, maximum=4

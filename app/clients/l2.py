@@ -203,10 +203,15 @@ class L2Client:
                 "LUNIT_FM_API_KEY must be injected at runtime before chat completions can run."
             )
 
+        # Sampling was previously left to the server default, which is what produced the
+        # word-salad and code-token tails seen on longer answers. The organizer's own
+        # reference client pins greedy decoding, so match it.
         payload: dict[str, Any] = {
             "model": self._settings.model,
             "messages": [dict(message) for message in messages],
             "max_tokens": self._settings.l2_max_tokens,
+            "temperature": self._settings.l2_temperature,
+            "top_p": self._settings.l2_top_p,
         }
         if tools:
             payload["tools"] = [dict(tool) for tool in tools]
