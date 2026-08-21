@@ -26,6 +26,11 @@ LOGGER = logging.getLogger("lunit_retrieval")
 
 VALID_TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
+# How often one MCP tool may run within a single retrieval before the model is told to
+# switch tools or finalize. Repeats past this point were observed to return the same
+# material while consuming the whole tool-call budget.
+MAX_CALLS_PER_TOOL = 2
+
 
 FINALIZE_RETRIEVAL_TOOL: dict[str, Any] = {
     "type": "function",
@@ -411,6 +416,7 @@ class RetrievalEngine:
         finalizer_nudged = False
         mcp_budget_exhausted = False
         tool_cache: dict[str, str] = {}
+        tool_use_counts: dict[str, int] = {}
 
         while model_rounds < self._settings.max_retrieval_model_rounds:
             if not deadline.can_start(0.25):
@@ -532,6 +538,29 @@ class RetrievalEngine:
                         }
                     )
                     continue
+                # The model otherwise re-runs a tool that is not paying off — observed as
+                # four consecutive hira_updates_search calls, and as three futile
+                # relevant_nodes/page_content cycles that burned the whole budget.
+                used_before = tool_use_counts.get(tool.name, 0)
+                if used_before >= MAX_CALLS_PER_TOOL:
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": call.id,
+                            "content": json.dumps(
+                                {
+                                    "error": "tool_repeat_limit_reached",
+                                    "instruction": (
+                                        f"{tool.name} has already run {used_before} times and is "
+                                        "not yielding new evidence. Use a different tool for the "
+                                        "remaining gap, or call finalize_retrieval now."
+                                    ),
+                                },
+                                ensure_ascii=False,
+                            ),
+                        }
+                    )
+                    continue
                 try:
                     arguments = parse_tool_arguments(call.arguments)
                 except (ValueError, json.JSONDecodeError):
@@ -562,6 +591,7 @@ class RetrievalEngine:
                         deadline=deadline,
                     )
                     mcp_calls += 1
+                    tool_use_counts[tool.name] = used_before + 1
                     cite_uids = registry.register_payload(result, source_tool=tool.name)
                     LOGGER.info(
                         "retrieval_tool_completed tool=%s call=%s citations=%s",
@@ -596,6 +626,8 @@ class RetrievalEngine:
                         and not cite_uids
                         and page_content_tool is not None
                         and mcp_calls < self._settings.max_mcp_tool_calls
+                        and tool_use_counts.get(page_content_tool.name, 0)
+                        < MAX_CALLS_PER_TOOL
                     ):
                         page_arguments = _index_page_arguments(
                             result,
@@ -614,6 +646,9 @@ class RetrievalEngine:
                                     deadline=deadline,
                                 )
                                 mcp_calls += 1
+                                tool_use_counts[page_content_tool.name] = (
+                                    tool_use_counts.get(page_content_tool.name, 0) + 1
+                                )
                                 page_cite_uids = registry.register_payload(
                                     page_result,
                                     source_tool=page_content_tool.name,
@@ -670,6 +705,9 @@ class RetrievalEngine:
                                     )
                             except AppError as exc:
                                 mcp_calls += 1
+                                tool_use_counts[page_content_tool.name] = (
+                                    tool_use_counts.get(page_content_tool.name, 0) + 1
+                                )
                                 LOGGER.warning(
                                     "retrieval_tool_failed tool=%s call=%s code=%s auto=true",
                                     page_content_tool.name,
@@ -683,6 +721,7 @@ class RetrievalEngine:
                                 )
                 except AppError as exc:
                     mcp_calls += 1
+                    tool_use_counts[tool.name] = used_before + 1
                     LOGGER.warning(
                         "retrieval_tool_failed tool=%s call=%s code=%s",
                         tool.name,

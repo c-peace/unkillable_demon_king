@@ -68,21 +68,21 @@ class Settings:
     lunit_fm_api_key: str | None = None
     lunit_mcp_url: str = "https://mcp.hackathon.lunit.io/mcp"
     request_timeout_sec: float | None = 240.0
-    retrieval_timeout_sec: float | None = 120.0
-    l2_timeout_sec: float = 60.0
+    retrieval_timeout_sec: float | None = 90.0
+    l2_timeout_sec: float = 90.0
     mcp_timeout_sec: float = 60.0
     l2_retries: int = 1
     empty_output_retries: int = 1
     l2_max_tokens: int = 4_096
     max_generation_retrievals: int = 2
-    max_retrieval_model_rounds: int = 5
-    max_mcp_tool_calls: int = 6
+    max_retrieval_model_rounds: int = 4
+    max_mcp_tool_calls: int = 4
     max_mcp_tools: int = 64
     max_request_bytes: int = 1_048_576
     max_upstream_response_bytes: int = 4_194_304
     max_tool_result_chars: int = 8_000
     max_retrieval_query_chars: int = 4_000
-    max_evidence_items: int = 8
+    max_evidence_items: int = 6
     max_evidence_chars: int = 8_000
     mcp_protocol_version: str = "2025-03-26"
     mcp_tool_mode: str = "family"
@@ -121,12 +121,12 @@ class Settings:
             ),
             retrieval_timeout_sec=_as_optional_float(
                 source.get("RETRIEVAL_TIMEOUT_SEC"),
-                120.0,
+                90.0,
                 minimum=1.0,
                 maximum=300.0,
             ),
             l2_timeout_sec=_as_float(
-                source.get("L2_TIMEOUT_SEC"), 60.0, minimum=1.0, maximum=300.0
+                source.get("L2_TIMEOUT_SEC"), 90.0, minimum=1.0, maximum=300.0
             ),
             mcp_timeout_sec=_as_float(
                 source.get("MCP_TIMEOUT_SEC"), 60.0, minimum=1.0, maximum=300.0
@@ -147,10 +147,10 @@ class Settings:
                 source.get("MAX_GENERATION_RETRIEVALS"), 2, minimum=0, maximum=4
             ),
             max_retrieval_model_rounds=_as_int(
-                source.get("MAX_RETRIEVAL_MODEL_ROUNDS"), 5, minimum=1, maximum=12
+                source.get("MAX_RETRIEVAL_MODEL_ROUNDS"), 4, minimum=1, maximum=12
             ),
             max_mcp_tool_calls=_as_int(
-                source.get("MAX_MCP_TOOL_CALLS"), 6, minimum=0, maximum=24
+                source.get("MAX_MCP_TOOL_CALLS"), 4, minimum=0, maximum=24
             ),
             max_mcp_tools=_as_int(
                 source.get("MAX_MCP_TOOLS"), 64, minimum=1, maximum=256
@@ -180,7 +180,7 @@ class Settings:
                 maximum=20_000,
             ),
             max_evidence_items=_as_int(
-                source.get("MAX_EVIDENCE_ITEMS"), 8, minimum=1, maximum=32
+                source.get("MAX_EVIDENCE_ITEMS"), 6, minimum=1, maximum=32
             ),
             max_evidence_chars=_as_int(
                 source.get("MAX_EVIDENCE_CHARS"),
