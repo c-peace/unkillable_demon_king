@@ -4,6 +4,7 @@ import json
 import logging
 import signal
 import threading
+import time
 import uuid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -186,11 +187,33 @@ def build_server(
     settings: Settings,
     *,
     driver: ConversationDriver | None = None,
+    bind_attempts: int = 10,
+    bind_retry_delay_sec: float = 1.0,
 ) -> DriverHTTPServer:
-    return DriverHTTPServer(
-        (settings.host, settings.port),
-        DriverService(settings, driver=driver),
-    )
+    # The evaluator creates the container and then starts it, sometimes while a previous
+    # container still holds the port. Binding is the first thing that can kill the
+    # process before any log line exists, so retry briefly instead of exiting.
+    service = DriverService(settings, driver=driver)
+    last_error: OSError | None = None
+    for attempt in range(1, bind_attempts + 1):
+        try:
+            return DriverHTTPServer((settings.host, settings.port), service)
+        except OSError as exc:
+            last_error = exc
+            LOGGER.warning(
+                "bind_failed attempt=%s/%s host=%s port=%s errno=%s %s",
+                attempt,
+                bind_attempts,
+                settings.host,
+                settings.port,
+                exc.errno,
+                exc,
+            )
+            if attempt == bind_attempts:
+                break
+            time.sleep(bind_retry_delay_sec)
+    assert last_error is not None
+    raise last_error
 
 
 def serve(settings: Settings) -> None:
