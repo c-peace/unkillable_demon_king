@@ -8,7 +8,7 @@ Preserve project knowledge across context compaction and new sessions, then begi
 
 ## Current phase
 
-**Target harness architecture selected; implementation has not started.** Organizer requirements, benchmark/evaluator understanding, and an advanced risk-adaptive L2/RAG design are documented.
+**Target harness architecture and literature synthesis complete; implementation has not started.** Organizer requirements, benchmark/evaluator understanding, five relevant papers, and the advanced risk-adaptive L2/RAG design are documented.
 
 ## Workspace status
 
@@ -17,6 +17,7 @@ Preserve project knowledge across context compaction and new sessions, then begi
 - The current HEAD is commit `35ca0d2` (`init setting`).
 - The remote currently contributes only `README.md`; no application source, dependency manifest, tests, or Dockerfile exists yet.
 - `healthBench.pdf` is already tracked by Git as a public-paper reference. Generated PDF-inspection artifacts under `tmp/` are ignored.
+- The five newly supplied papers are present under repository-root `reference/` and are currently untracked; the user-referenced `.agents/.../references/` directory contains the derived project notes.
 - No real API key or patient data is stored in the workspace knowledge files.
 
 ## Completed
@@ -34,6 +35,7 @@ Preserve project knowledge across context compaction and new sessions, then begi
 - Captured benchmark structure, themes, evaluation axes, interpretation limits, and generalizable L2 harness implications in `references/healthbench-overview.md` without retaining case-specific or grader-exploitation material.
 - Reviewed OpenAI's public `simple-evals` HealthBench execution flow at commit `652c89d0ca9df547706735883097e9537d40dc47` and captured interface-safe implications in `references/simple-evals-reference.md` without inspecting benchmark rows.
 - Documented the advanced target architecture in `references/advanced-harness-design.md`: progressive execution lanes, request-local clinical state, claim-driven MCP retrieval, evidence registry/provenance verification, and conditional L2 review/revision.
+- Reviewed five supplied papers (87 pages total) and captured their generalizable findings, evidence limitations, conflicts, anti-reverse-engineering boundaries, and architecture implications in `references/literature-synthesis.md`.
 
 ## Active decisions
 
@@ -52,6 +54,12 @@ Preserve project knowledge across context compaction and new sessions, then begi
 - Keep retrieval source selection explicit and authority-ranked by task type, with fallback when router confidence is low, rather than exposing every MCP tool to every question by default.
 - Use progressive `DIRECT`, `CLARIFY`, `GROUNDED`, and `HIGH-RISK` lanes so advanced retrieval, verification, and revision run only when their expected benefit justifies their latency and failure surface.
 - Treat `cite_uid` provenance and the request-local evidence registry as a core subsystem; never pass arbitrary raw retrieval traces or unknown citation identifiers into the final answer path.
+- Use a provenance-linked dual-track response contract: clinical/evidence requirements plus interaction/context requirements.
+- Make retrieval gap-aware and sufficiency-driven; continue only for named unsupported claims and bound depth because additional rounds can add noise.
+- Never infer answer confidence from retrieval relevance or source tier alone; use answer-level verification and explicit unresolved uncertainty.
+- Do not adopt paper-specific specialty branches, exact length targets, hard-coded benchmark anchors, or blanket safety gates.
+- Implement SEMA-style interpretation/exploration/adjudication initially inside one retrieval-stage L2 loop backed by a harness-validated Evidence Requirement Ledger; do not multiply L2 agents unless ablation shows a benefit.
+- Treat `finalize_retrieval(status="sufficient")` as a validated completion decision over critical evidence requirements, not as a model's unverified impression that search results look adequate.
 
 ## Verification evidence
 
@@ -63,6 +71,7 @@ Preserve project knowledge across context compaction and new sessions, then begi
 - `git log -1 --oneline` reported `35ca0d2 init setting`.
 - `healthBench.pdf` parsed as a 39-page paper; all pages were rendered and visually checked via a contact sheet, with key tables and scoring sections inspected at original resolution.
 - `git ls-remote https://github.com/openai/simple-evals.git HEAD` returned `652c89d0ca9df547706735883097e9537d40dc47`; the public `healthbench_eval.py`, runner integration, and chat-completion sampler were inspected without downloading benchmark data.
+- All five PDFs under `reference/` were extracted and all 87 pages rendered; complete contact sheets plus original-resolution architecture/result pages were visually checked.
 
 ## Open questions and blockers
 
@@ -76,8 +85,8 @@ Preserve project knowledge across context compaction and new sessions, then begi
 1. Inspect the live L2 tool-calling wire format and MCP schemas without storing secrets.
 2. Scaffold the stateless OpenAI-compatible service, Docker image, request deadline, and generation-only L2 path.
 3. Implement full-history preservation and compare native messages with a flattened role-labelled case packet.
-4. Add the bounded retrieval L2/MCP/finalizer loop and request-local evidence registry.
-5. Add claim-driven routing, provenance verification, clinical working state, and conditional review as independently ablatable modules.
+4. Add the bounded retrieval L2/MCP/finalizer loop, Evidence Requirement Ledger, and request-local evidence registry.
+5. Add claim-driven routing, validated sufficiency/gap checks, dual-track response contracts, provenance verification, clinical working state, and conditional answer-level review as independently ablatable modules.
 6. Build synthetic capability suites and enable only modules that improve quality and reliability under measured runtime budgets.
 
 ## Update protocol
