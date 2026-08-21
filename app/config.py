@@ -1,0 +1,167 @@
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from typing import Mapping
+
+
+def _as_bool(value: str | None, default: bool) -> bool:
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"invalid boolean value: {value!r}")
+
+
+def _as_int(
+    value: str | None,
+    default: int,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int:
+    parsed = default if value is None else int(value)
+    if not minimum <= parsed <= maximum:
+        raise ValueError(f"integer must be between {minimum} and {maximum}")
+    return parsed
+
+
+def _as_float(
+    value: str | None,
+    default: float,
+    *,
+    minimum: float,
+    maximum: float,
+) -> float:
+    parsed = default if value is None else float(value)
+    if not minimum <= parsed <= maximum:
+        raise ValueError(f"number must be between {minimum} and {maximum}")
+    return parsed
+
+
+@dataclass(frozen=True, slots=True)
+class Settings:
+    host: str = "0.0.0.0"
+    port: int = 8000
+    model: str = "Lunit/L2-preview"
+    lunit_fm_api_url: str = "https://model.hackathon.lunit.io"
+    lunit_fm_api_key: str | None = None
+    lunit_mcp_url: str = "https://mcp.hackathon.lunit.io/mcp"
+    request_timeout_sec: float = 90.0
+    l2_timeout_sec: float = 40.0
+    mcp_timeout_sec: float = 60.0
+    l2_retries: int = 1
+    empty_output_retries: int = 1
+    max_generation_retrievals: int = 1
+    max_retrieval_model_rounds: int = 5
+    max_mcp_tool_calls: int = 6
+    max_mcp_tools: int = 64
+    max_request_bytes: int = 1_048_576
+    max_upstream_response_bytes: int = 4_194_304
+    max_tool_result_chars: int = 16_000
+    max_retrieval_query_chars: int = 4_000
+    max_evidence_items: int = 8
+    max_evidence_chars: int = 16_000
+    mcp_protocol_version: str = "2025-03-26"
+    mcp_tool_mode: str = "all"
+    enable_mcp: bool = True
+    enable_high_risk_review: bool = False
+    conversation_representation: str = "native"
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":
+        source = os.environ if env is None else env
+        tool_mode = source.get("MCP_TOOL_MODE", "all").strip().lower()
+        if tool_mode not in {"all", "family"}:
+            raise ValueError("MCP_TOOL_MODE must be 'all' or 'family'")
+        representation = source.get("CONVERSATION_REPRESENTATION", "native").strip().lower()
+        if representation not in {"native", "case_packet"}:
+            raise ValueError(
+                "CONVERSATION_REPRESENTATION must be 'native' or 'case_packet'"
+            )
+
+        key = source.get("LUNIT_FM_API_KEY")
+        return cls(
+            host=source.get("HOST", "0.0.0.0"),
+            port=_as_int(source.get("PORT"), 8000, minimum=1, maximum=65535),
+            model=source.get("LUNIT_FM_MODEL", "Lunit/L2-preview"),
+            lunit_fm_api_url=source.get(
+                "LUNIT_FM_API_URL", "https://model.hackathon.lunit.io"
+            ).rstrip("/"),
+            lunit_fm_api_key=key.strip() if key and key.strip() else None,
+            lunit_mcp_url=source.get(
+                "LUNIT_MCP_URL", "https://mcp.hackathon.lunit.io/mcp"
+            ),
+            request_timeout_sec=_as_float(
+                source.get("REQUEST_TIMEOUT_SEC"), 90.0, minimum=1.0, maximum=600.0
+            ),
+            l2_timeout_sec=_as_float(
+                source.get("L2_TIMEOUT_SEC"), 40.0, minimum=1.0, maximum=300.0
+            ),
+            mcp_timeout_sec=_as_float(
+                source.get("MCP_TIMEOUT_SEC"), 60.0, minimum=1.0, maximum=300.0
+            ),
+            l2_retries=_as_int(
+                source.get("MAX_L2_RETRIES"), 1, minimum=0, maximum=5
+            ),
+            empty_output_retries=_as_int(
+                source.get("EMPTY_OUTPUT_RETRIES"), 1, minimum=0, maximum=3
+            ),
+            max_generation_retrievals=_as_int(
+                source.get("MAX_GENERATION_RETRIEVALS"), 1, minimum=0, maximum=4
+            ),
+            max_retrieval_model_rounds=_as_int(
+                source.get("MAX_RETRIEVAL_MODEL_ROUNDS"), 5, minimum=1, maximum=12
+            ),
+            max_mcp_tool_calls=_as_int(
+                source.get("MAX_MCP_TOOL_CALLS"), 6, minimum=0, maximum=24
+            ),
+            max_mcp_tools=_as_int(
+                source.get("MAX_MCP_TOOLS"), 64, minimum=1, maximum=256
+            ),
+            max_request_bytes=_as_int(
+                source.get("MAX_REQUEST_BYTES"),
+                1_048_576,
+                minimum=1_024,
+                maximum=16_777_216,
+            ),
+            max_upstream_response_bytes=_as_int(
+                source.get("MAX_UPSTREAM_RESPONSE_BYTES"),
+                4_194_304,
+                minimum=65_536,
+                maximum=33_554_432,
+            ),
+            max_tool_result_chars=_as_int(
+                source.get("MAX_TOOL_RESULT_CHARS"),
+                16_000,
+                minimum=1_000,
+                maximum=100_000,
+            ),
+            max_retrieval_query_chars=_as_int(
+                source.get("MAX_RETRIEVAL_QUERY_CHARS"),
+                4_000,
+                minimum=256,
+                maximum=20_000,
+            ),
+            max_evidence_items=_as_int(
+                source.get("MAX_EVIDENCE_ITEMS"), 8, minimum=1, maximum=32
+            ),
+            max_evidence_chars=_as_int(
+                source.get("MAX_EVIDENCE_CHARS"),
+                16_000,
+                minimum=1_000,
+                maximum=100_000,
+            ),
+            mcp_protocol_version=source.get(
+                "MCP_PROTOCOL_VERSION", "2025-03-26"
+            ),
+            mcp_tool_mode=tool_mode,
+            enable_mcp=_as_bool(source.get("ENABLE_MCP"), True),
+            enable_high_risk_review=_as_bool(
+                source.get("ENABLE_HIGH_RISK_REVIEW"), False
+            ),
+            conversation_representation=representation,
+        )

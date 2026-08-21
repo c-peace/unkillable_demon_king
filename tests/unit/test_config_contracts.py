@@ -1,0 +1,66 @@
+from __future__ import annotations
+
+import unittest
+
+from app.config import Settings
+from app.contracts import parse_chat_completion_request
+from app.errors import AppError
+
+
+class SettingsTests(unittest.TestCase):
+    def test_defaults_are_submission_compatible(self) -> None:
+        settings = Settings.from_env({})
+        self.assertEqual(settings.host, "0.0.0.0")
+        self.assertEqual(settings.port, 8000)
+        self.assertEqual(settings.model, "Lunit/L2-preview")
+        self.assertIsNone(settings.lunit_fm_api_key)
+
+    def test_invalid_mode_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "MCP_TOOL_MODE"):
+            Settings.from_env({"MCP_TOOL_MODE": "magic"})
+
+
+class ContractTests(unittest.TestCase):
+    def test_full_message_history_is_preserved(self) -> None:
+        request = parse_chat_completion_request(
+            {
+                "model": "client-alias",
+                "messages": [
+                    {"role": "user", "content": "아스피린을 복용 중입니다."},
+                    {"role": "assistant", "content": "확인했습니다."},
+                    {
+                        "role": "user",
+                        "content": [{"type": "text", "text": "그 약과 같이 먹어도 되나요?"}],
+                    },
+                ],
+            },
+            default_model="Lunit/L2-preview",
+        )
+        self.assertEqual(len(request.messages), 3)
+        self.assertEqual(request.messages[-1]["content"], "그 약과 같이 먹어도 되나요?")
+
+    def test_streaming_is_explicitly_rejected(self) -> None:
+        with self.assertRaises(AppError) as raised:
+            parse_chat_completion_request(
+                {"messages": [{"role": "user", "content": "hello"}], "stream": True},
+                default_model="Lunit/L2-preview",
+            )
+        self.assertEqual(raised.exception.code, "unsupported_streaming")
+
+    def test_non_text_content_is_rejected(self) -> None:
+        with self.assertRaises(AppError):
+            parse_chat_completion_request(
+                {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [{"type": "image_url", "image_url": "x"}],
+                        }
+                    ]
+                },
+                default_model="Lunit/L2-preview",
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()
