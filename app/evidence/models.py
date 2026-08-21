@@ -190,7 +190,9 @@ class RetrievalOutcome:
                 "fabricate support. They supplement your medical knowledge rather than "
                 "limiting it, so when the status is partial or no_evidence, or the records "
                 "do not address the question, answer from established medical knowledge and "
-                "attach no citation to those parts. Do not refuse or describe the retrieval. "
+                "attach no citation to those parts. Do not refuse and do not describe the "
+                "retrieval. These records are often Korean: reply in the user's own language "
+                "and translate what you cite, never switching language to match the evidence. "
                 "cite_uid is provenance, not answer confidence."
             ),
         }
