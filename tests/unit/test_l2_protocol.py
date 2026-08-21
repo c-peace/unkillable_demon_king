@@ -42,6 +42,57 @@ class L2ProtocolTests(unittest.TestCase):
             {"status": "no_evidence", "items": []},
         )
 
+    def test_text_encoded_tool_call_is_normalized(self) -> None:
+        response = _parse_response(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": (
+                                "<tool_call>retrieve_relevant_content\n"
+                                "<arg_key>query</arg_key>\n"
+                                "<arg_value>CKD blood pressure guideline</arg_value>\n"
+                                "</tool_call>"
+                            ),
+                        }
+                    }
+                ]
+            }
+        )
+        self.assertEqual(response.content, "")
+        self.assertEqual(response.tool_calls[0].name, "retrieve_relevant_content")
+        self.assertEqual(
+            parse_tool_arguments(response.tool_calls[0].arguments),
+            {"query": "CKD blood pressure guideline"},
+        )
+
+    def test_text_encoded_tool_call_replaces_empty_native_call_list(self) -> None:
+        response = _parse_response(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": (
+                                "<tool_call>retrieve_relevant_content\n"
+                                "<arg_key>query</arg_key>\n"
+                                "<arg_value>official drug label</arg_value>\n"
+                                "</tool_call>"
+                            ),
+                            "tool_calls": [],
+                        }
+                    }
+                ]
+            }
+        )
+        self.assertEqual(response.content, "")
+        self.assertEqual(response.assistant_message["tool_calls"][0]["id"], "text_tool_call_0")
+        self.assertEqual(
+            response.assistant_message["tool_calls"][0]["function"]["name"],
+            "retrieve_relevant_content",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

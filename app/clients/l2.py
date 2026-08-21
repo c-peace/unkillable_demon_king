@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
@@ -25,6 +26,61 @@ class L2Response:
     tool_calls: tuple[ToolCall, ...]
     assistant_message: dict[str, Any]
     usage: dict[str, int]
+
+
+_TEXT_TOOL_CALL_BLOCK = re.compile(
+    r"<tool_call>\s*([A-Za-z_][A-Za-z0-9_-]{0,127})\s*(.*?)\s*</tool_call>",
+    re.DOTALL,
+)
+_TEXT_TOOL_ARGUMENT = re.compile(
+    r"<arg_key>\s*([A-Za-z_][A-Za-z0-9_-]{0,127})\s*</arg_key>\s*"
+    r"<arg_value>(.*?)</arg_value>",
+    re.DOTALL,
+)
+
+
+def _parse_text_encoded_tool_calls(content: str) -> tuple[ToolCall, ...]:
+    """Normalize L2's legacy XML-like tool syntax only when it is the whole message."""
+    text = content.strip()
+    if not text:
+        return ()
+
+    blocks = list(_TEXT_TOOL_CALL_BLOCK.finditer(text))
+    if not blocks:
+        return ()
+
+    cursor = 0
+    parsed: list[ToolCall] = []
+    for index, block in enumerate(blocks):
+        if text[cursor : block.start()].strip():
+            return ()
+        cursor = block.end()
+
+        body = block.group(2)
+        arguments: dict[str, str] = {}
+        argument_cursor = 0
+        for argument in _TEXT_TOOL_ARGUMENT.finditer(body):
+            if body[argument_cursor : argument.start()].strip():
+                return ()
+            key = argument.group(1)
+            if key in arguments:
+                return ()
+            arguments[key] = argument.group(2).strip()
+            argument_cursor = argument.end()
+        if body[argument_cursor:].strip():
+            return ()
+
+        parsed.append(
+            ToolCall(
+                id=f"text_tool_call_{index}",
+                name=block.group(1),
+                arguments=arguments,
+            )
+        )
+
+    if text[cursor:].strip():
+        return ()
+    return tuple(parsed)
 
 
 def parse_tool_arguments(value: Any) -> dict[str, Any]:
@@ -97,10 +153,14 @@ def _parse_response(payload: Any) -> L2Response:
                 )
             )
 
+    if not parsed_calls and content:
+        text_calls = _parse_text_encoded_tool_calls(content)
+        if text_calls:
+            parsed_calls.extend(text_calls)
+            content = ""
+
     assistant_message: dict[str, Any] = {"role": "assistant", "content": content or None}
-    if isinstance(raw_calls, list):
-        assistant_message["tool_calls"] = raw_calls
-    elif parsed_calls:
+    if parsed_calls:
         assistant_message["tool_calls"] = [
             {
                 "id": call.id,
