@@ -106,6 +106,9 @@ class ConversationDriver:
         last_outcome: RetrievalOutcome | None = None
         draft = ""
         retrieval_closed_prompt_added = False
+        generation_seconds = 0.0
+        retrieval_seconds = 0.0
+        review_seconds = 0.0
 
         if self._settings.max_generation_retrievals == 0:
             messages.insert(
@@ -121,7 +124,9 @@ class ConversationDriver:
                 if retrieval_count < self._settings.max_generation_retrievals
                 else None
             )
+            generation_started = time.monotonic()
             response = self._l2.complete(messages, deadline=deadline, tools=tools)
+            generation_seconds += time.monotonic() - generation_started
             l2_calls += 1
             _sum_usage(usage, response.usage)
 
@@ -165,8 +170,15 @@ class ConversationDriver:
                     continue
 
                 retrieval_count += 1
+                retrieval_started = time.monotonic()
                 try:
-                    run = self._retrieval.run(query.strip(), deadline=deadline)
+                    retrieval_deadline = deadline.with_timeout_cap(
+                        self._settings.retrieval_timeout_sec
+                    )
+                    run = self._retrieval.run(
+                        query.strip(),
+                        deadline=retrieval_deadline,
+                    )
                     last_outcome = run.outcome
                     retrieval_l2_calls += run.l2_calls
                     mcp_calls += run.outcome.mcp_calls
@@ -193,6 +205,8 @@ class ConversationDriver:
                         },
                         ensure_ascii=False,
                     )
+                finally:
+                    retrieval_seconds += time.monotonic() - retrieval_started
                 messages.append(
                     {"role": "tool", "tool_call_id": call.id, "content": content}
                 )
@@ -213,7 +227,9 @@ class ConversationDriver:
                     "content": GENERATION_AFTER_RETRIEVAL_PROMPT,
                 }
             )
+            generation_started = time.monotonic()
             response = self._l2.complete(messages, deadline=deadline, tools=None)
+            generation_seconds += time.monotonic() - generation_started
             l2_calls += 1
             _sum_usage(usage, response.usage)
             if response.tool_calls or not response.content:
@@ -226,6 +242,7 @@ class ConversationDriver:
         reviewed = False
         revised = False
         if self._should_review(compiled, last_outcome) and deadline.can_start(1.0):
+            review_started = time.monotonic()
             draft, review_l2_calls, reviewed, revised, review_usage = self._review(
                 compiled,
                 draft,
@@ -234,6 +251,7 @@ class ConversationDriver:
             )
             l2_calls += review_l2_calls
             _sum_usage(usage, review_usage)
+            review_seconds += time.monotonic() - review_started
 
         lane = "HIGH_RISK" if compiled.is_high_risk else "GROUNDED" if retrieval_count else "DIRECT"
         trace = {
@@ -250,6 +268,9 @@ class ConversationDriver:
             "reviewed": reviewed,
             "revised": revised,
             "response_chars": len(draft),
+            "generation_latency_ms": round(generation_seconds * 1000),
+            "retrieval_latency_ms": round(retrieval_seconds * 1000),
+            "review_latency_ms": round(review_seconds * 1000),
             "latency_ms": round((time.monotonic() - started) * 1000),
             "state": "completed",
         }
