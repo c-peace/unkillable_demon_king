@@ -11,14 +11,13 @@ from app.config import Settings
 from app.contracts import ChatCompletionRequest
 from app.conversation import CompiledConversation, compile_conversation
 from app.admission import admit
-from app.commit import COMMIT_TOOL, applies_to, compose, unpack
+from app.evidence_policy import COMMIT_BUDGET, ROLLBACK, decide_commit
 from app.coverage import extract_contract
 from app.deadline import Deadline
 from app.errors import AppError, UpstreamError
 from app.evidence.models import RetrievalOutcome
 from app.orchestration.retrieval import RetrievalEngine
 from app.prompts import (
-    ASK_ONE_PROMPT,
     GENERATION_AFTER_RETRIEVAL_PROMPT,
     generation_system_prompt,
     REVIEW_SYSTEM_PROMPT,
@@ -106,31 +105,74 @@ class ConversationDriver:
         # nothing marks that a search was weighed — see app/admission.py for why the model
         # must not be able to observe the difference.
         admission = admit(compiled.latest_user_text)
-        retrieval_budget = (
-            self._settings.max_generation_retrievals if admission.admitted else 0
-        )
+        usage: dict[str, int] = {}
+        retrieval_seconds = 0.0
+        preflight: RetrievalOutcome | None = None
+        commit_mode = ROLLBACK
+        preflight_l2 = 0
+        preflight_mcp = 0
+
+        # Retrieval is a speculative side effect. On the evidence lane the harness runs the
+        # search itself, looks at what came back, and only then decides whether the model
+        # ever sees it. A search that came back thin is rolled back entirely — the model is
+        # given the same request it would have got had no search happened, because letting
+        # it observe a failed search is what cost 0.034 in an earlier version.
+        if admission.admitted:
+            preflight_started = time.monotonic()
+            try:
+                run = self._retrieval.run(
+                    compiled.latest_user_text,
+                    deadline=deadline.with_timeout_cap(
+                        self._settings.retrieval_timeout_sec
+                    ),
+                )
+                preflight = run.outcome
+                preflight_l2 = run.l2_calls
+                preflight_mcp = run.outcome.mcp_calls
+                _sum_usage(usage, run.usage)
+                commit_mode = decide_commit(
+                    admission.domains, preflight.status, bool(preflight.evidence)
+                )
+            except AppError as exc:
+                LOGGER.warning(
+                    "preflight retrieval failed",
+                    extra={"request_id": request_id, "retrieval_error": exc.code},
+                )
+            finally:
+                retrieval_seconds += time.monotonic() - preflight_started
+
+        evidence_offered = commit_mode != ROLLBACK and preflight is not None
+        retrieval_budget = 0
         messages: list[dict[str, Any]] = [
             {
                 "role": "system",
                 "content": generation_system_prompt(
-                    retrieval_offered=admission.admitted
+                    retrieval_offered=evidence_offered
                 ),
             },
             *compiled.generation_messages(self._settings.conversation_representation),
         ]
+        if evidence_offered and preflight is not None:
+            max_items, max_chars = COMMIT_BUDGET[commit_mode]
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "AUTHORITATIVE EVIDENCE\n"
+                        + preflight.to_generation_payload(max_chars=max_chars)
+                    ),
+                }
+            )
         if contract.is_multipart:
             messages.append({"role": "system", "content": contract.as_prompt()})
-        messages.append({"role": "system", "content": ASK_ONE_PROMPT})
-        usage: dict[str, int] = {}
         l2_calls = 0
-        retrieval_count = 0
-        retrieval_l2_calls = 0
-        mcp_calls = 0
-        last_outcome: RetrievalOutcome | None = None
+        retrieval_count = 1 if evidence_offered else 0
+        retrieval_l2_calls = preflight_l2
+        mcp_calls = preflight_mcp
+        last_outcome: RetrievalOutcome | None = preflight if evidence_offered else None
         draft = ""
         retrieval_closed_prompt_added = False
         generation_seconds = 0.0
-        retrieval_seconds = 0.0
         review_seconds = 0.0
 
         if self._settings.max_generation_retrievals == 0:
@@ -140,39 +182,8 @@ class ConversationDriver:
             )
             retrieval_closed_prompt_added = True
 
-        # On the memory lane there is no retrieval to interleave, so the single generation
-        # call can be made under an output contract instead: a tool the model must call,
-        # carrying the answer and a required field for the closing question. Four attempts
-        # to get that question by instruction failed in English; the schema channel
-        # produced it on every case tried. See app/commit.py.
-        committed = 0
-        if retrieval_budget == 0 and applies_to(compiled.latest_user_text):
-            generation_started = time.monotonic()
-            response = self._l2.complete(
-                messages,
-                deadline=deadline,
-                tools=[COMMIT_TOOL],
-                tool_choice="required",
-            )
-            generation_seconds += time.monotonic() - generation_started
-            l2_calls += 1
-            _sum_usage(usage, response.usage)
-            for call in response.tool_calls or ():
-                if call.name != "commit_response":
-                    continue
-                answer, question = unpack(call.arguments)
-                composed = compose(answer, question)
-                if composed:
-                    draft = composed
-                    committed = 1 if question else 2
-                break
-            if not draft and response.content:
-                # The contract did not hold. The plain answer is still an answer.
-                draft = response.content
-                committed = 3
-
         max_rounds = self._settings.max_generation_retrievals + 2
-        for _ in range(max_rounds if not draft else 0):
+        for _ in range(max_rounds):
             tools = (
                 [RETRIEVE_RELEVANT_CONTENT_TOOL]
                 if retrieval_count < retrieval_budget
@@ -310,7 +321,8 @@ class ConversationDriver:
             _sum_usage(usage, review_usage)
             review_seconds += time.monotonic() - review_started
 
-        lane = "HIGH_RISK" if compiled.is_high_risk else "GROUNDED" if retrieval_count else "DIRECT"
+        grounded = retrieval_count or evidence_offered
+        lane = "HIGH_RISK" if compiled.is_high_risk else "GROUNDED" if grounded else "DIRECT"
         trace = {
             "request_id": request_id,
             "history_hash": compiled.history_hash,
@@ -326,7 +338,9 @@ class ConversationDriver:
             "revised": revised,
             "requirements": len(contract.requirements),
             "lane_admission": admission.lane,
-            "committed": committed,
+            "commit_mode": commit_mode,
+            "preflight_l2": preflight_l2,
+            "preflight_status": preflight.status if preflight else "not_run",
             "admission_domains": ",".join(admission.domains),
             "response_chars": len(draft),
             "generation_latency_ms": round(generation_seconds * 1000),

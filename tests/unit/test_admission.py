@@ -95,10 +95,14 @@ class MemoryLaneIsIndistinguishableTest(unittest.TestCase):
         for trace in ("retrieve_relevant_content", "retriev", "a tool named", "disabled"):
             self.assertNotIn(trace, text, f"prompt leaked {trace!r}")
 
-    def test_an_admitted_question_still_gets_the_tool(self) -> None:
-        l2 = self._run("can I take ibuprofen with warfarin")
-        offered = [call["tools"] for call in l2.calls if call["tools"]]
-        self.assertTrue(offered, "the evidence lane was not given the retrieval tool")
+    def test_an_admitted_question_reaches_retrieval(self) -> None:
+        # The model is no longer handed a search tool on either lane — the harness runs the
+        # search itself and decides whether the result is fit to show. What admission
+        # controls is whether that search happens at all.
+        from app.admission import admit
+
+        self.assertTrue(admit("can I take ibuprofen with warfarin").admitted)
+        self.assertFalse(admit("why does hypertension develop").admitted)
 
 
 if __name__ == "__main__":

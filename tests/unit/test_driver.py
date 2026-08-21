@@ -171,10 +171,12 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(result.trace["retrieval_status"], "sufficient")
         self.assertEqual(result.trace["evidence_count"], 1)
         self.assertEqual(len(mcp.calls), 1)
+        # Evidence now arrives as a system block on the single generation call, because
+        # the harness runs the search itself and decides whether the model ever sees it.
         tool_message = next(
             message
-            for message in generation_l2.calls[1]["messages"]
-            if message.get("role") == "tool"
+            for message in generation_l2.calls[0]["messages"]
+            if message.get("role") == "system" and "AUTHORITATIVE EVIDENCE" in str(message.get("content"))
         )
         self.assertIn("cite-guideline", tool_message["content"])
         self.assertTrue(
@@ -279,7 +281,7 @@ class DriverTests(unittest.TestCase):
         result = driver.complete(
             ChatCompletionRequest(
                 model=settings.model,
-                messages=({"role": "user", "content": "임신 중 이 용량이 안전한가요?"},),
+                messages=({"role": "user", "content": "임신했는데 이 증상이 걱정돼요"},),
             ),
             request_id="req-review",
         )
@@ -342,12 +344,16 @@ class DriverTests(unittest.TestCase):
             request_id="req-retrieval-failure",
         )
         self.assertEqual(result.content, "근거가 제한적이지만 안전 중심으로 답변합니다.")
-        tool_message = next(
-            message
-            for message in generation_l2.calls[1]["messages"]
-            if message.get("role") == "tool"
+        # Nothing was found, so the search is rolled back and the model is given the same
+        # request it would have received had no search happened at all.
+        self.assertEqual(result.trace["commit_mode"], "rollback")
+        self.assertFalse(
+            any(
+                "AUTHORITATIVE EVIDENCE" in str(m.get("content"))
+                for call in generation_l2.calls
+                for m in call["messages"]
+            )
         )
-        self.assertIn('"status": "no_evidence"', tool_message["content"])
 
     def test_retrieval_uses_its_own_stage_budget_without_global_deadline(self) -> None:
         settings = Settings(enable_high_risk_review=False, 
