@@ -10,6 +10,7 @@ from app.clients.l2 import L2Client, parse_tool_arguments
 from app.config import Settings
 from app.contracts import ChatCompletionRequest
 from app.conversation import CompiledConversation, compile_conversation
+from app.coverage import extract_contract
 from app.deadline import Deadline
 from app.errors import AppError, UpstreamError
 from app.evidence.models import RetrievalOutcome
@@ -94,10 +95,15 @@ class ConversationDriver:
             else Deadline.after(self._settings.request_timeout_sec)
         )
         compiled = compile_conversation(request.messages)
+        # A message that asks three things gets two of them answered unless something holds
+        # the list. The model has nowhere to keep it, so the harness does.
+        contract = extract_contract(compiled.latest_user_text)
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": GENERATION_SYSTEM_PROMPT},
             *compiled.generation_messages(self._settings.conversation_representation),
         ]
+        if contract.is_multipart:
+            messages.append({"role": "system", "content": contract.as_prompt()})
         usage: dict[str, int] = {}
         l2_calls = 0
         retrieval_count = 0
@@ -273,6 +279,7 @@ class ConversationDriver:
             "evidence_count": len(last_outcome.evidence) if last_outcome else 0,
             "reviewed": reviewed,
             "revised": revised,
+            "requirements": len(contract.requirements),
             "response_chars": len(draft),
             "generation_latency_ms": round(generation_seconds * 1000),
             "retrieval_latency_ms": round(retrieval_seconds * 1000),
