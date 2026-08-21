@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import socket
+import threading
 import urllib.error
 import urllib.request
 import unittest
@@ -138,3 +140,34 @@ class ServerIntegrationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BindRetryTests(unittest.TestCase):
+    def test_build_server_retries_until_the_port_is_released(self) -> None:
+        blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        blocker.bind(("127.0.0.1", 0))
+        blocker.listen(1)
+        port = blocker.getsockname()[1]
+
+        releaser = threading.Timer(0.4, blocker.close)
+        releaser.start()
+        self.addCleanup(releaser.cancel)
+
+        settings = Settings(lunit_fm_api_key="test", host="127.0.0.1", port=port)
+        server = build_server(settings, bind_attempts=20, bind_retry_delay_sec=0.1)
+        self.addCleanup(server.server_close)
+
+        self.assertEqual(server.server_address[1], port)
+
+    def test_build_server_gives_up_and_raises_the_bind_error(self) -> None:
+        blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        blocker.bind(("127.0.0.1", 0))
+        blocker.listen(1)
+        self.addCleanup(blocker.close)
+        port = blocker.getsockname()[1]
+
+        settings = Settings(lunit_fm_api_key="test", host="127.0.0.1", port=port)
+        with self.assertRaises(OSError):
+            build_server(settings, bind_attempts=2, bind_retry_delay_sec=0.01)
