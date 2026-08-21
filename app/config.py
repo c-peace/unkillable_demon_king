@@ -116,8 +116,13 @@ class Settings:
     mcp_protocol_version: str = "2025-03-26"
     mcp_tool_mode: str = "family"
     enable_mcp: bool = True
-    enable_high_risk_review: bool = False
+    enable_high_risk_review: bool = True
     conversation_representation: str = "native"
+    planner_policy: str = "state"
+    clarification_policy: str = "conditional"
+    retrieval_ledger_policy: str = "ledger"
+    review_policy: str = "conditional"
+    empty_recovery_policy: str = "stateful"
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":
@@ -132,6 +137,29 @@ class Settings:
             raise ValueError(
                 "CONVERSATION_REPRESENTATION must be 'native' or 'case_packet'"
             )
+        planner_policy = (source.get("PLANNER_POLICY") or "state").strip().lower()
+        if planner_policy not in {"legacy", "state"}:
+            raise ValueError("PLANNER_POLICY must be 'legacy' or 'state'")
+        clarification_policy = (
+            source.get("CLARIFICATION_POLICY") or "conditional"
+        ).strip().lower()
+        if clarification_policy not in {"always", "conditional", "never"}:
+            raise ValueError(
+                "CLARIFICATION_POLICY must be 'always', 'conditional', or 'never'"
+            )
+        ledger_policy = (
+            source.get("RETRIEVAL_LEDGER_POLICY") or "ledger"
+        ).strip().lower()
+        if ledger_policy not in {"legacy", "ledger"}:
+            raise ValueError("RETRIEVAL_LEDGER_POLICY must be 'legacy' or 'ledger'")
+        review_policy = (source.get("REVIEW_POLICY") or "conditional").strip().lower()
+        if review_policy not in {"off", "conditional", "always"}:
+            raise ValueError("REVIEW_POLICY must be 'off', 'conditional', or 'always'")
+        recovery_policy = (
+            source.get("EMPTY_RECOVERY_POLICY") or "stateful"
+        ).strip().lower()
+        if recovery_policy not in {"legacy", "stateful"}:
+            raise ValueError("EMPTY_RECOVERY_POLICY must be 'legacy' or 'stateful'")
 
         key = source.get("LUNIT_FM_API_KEY")
         if env is None and (not key or not key.strip()):
@@ -231,7 +259,12 @@ class Settings:
             mcp_tool_mode=tool_mode,
             enable_mcp=_as_bool(source.get("ENABLE_MCP"), True),
             enable_high_risk_review=_as_bool(
-                source.get("ENABLE_HIGH_RISK_REVIEW"), False
+                source.get("ENABLE_HIGH_RISK_REVIEW"), True
             ),
             conversation_representation=representation,
+            planner_policy=planner_policy,
+            clarification_policy=clarification_policy,
+            retrieval_ledger_policy=ledger_policy,
+            review_policy=review_policy,
+            empty_recovery_policy=recovery_policy,
         )

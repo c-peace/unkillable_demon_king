@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import json
 import unittest
+from collections import deque
+from dataclasses import replace
+from types import SimpleNamespace
 
+from app.clients.l2 import L2Client
 from app.clients.mcp import McpTool
 from app.config import Settings
 from app.contracts import ChatCompletionRequest
 from app.deadline import Deadline
 from app.errors import UpstreamError
+from app.evidence.models import EvidenceRequirement, RetrievalOutcome
 from app.orchestration.driver import ConversationDriver
 from app.orchestration.retrieval import RetrievalEngine
 from tests.fakes import NeverRetrieval, ScriptedL2, l2_content, l2_tool_call
@@ -84,9 +90,69 @@ class FakeMcp:
         }
 
 
+class PartialRetrieval:
+    def __init__(self) -> None:
+        self.requirements: tuple[EvidenceRequirement, ...] = ()
+
+    def run(self, query: str, *, deadline, requirements=()):
+        self.requirements = tuple(requirements)
+        unresolved = tuple(
+            replace(
+                requirement,
+                status="unresolved",
+                gap_reason="specific evidence is still missing",
+            )
+            for requirement in self.requirements
+        )
+        return SimpleNamespace(
+            outcome=RetrievalOutcome(
+                status="partial",
+                items=(),
+                note="Some critical evidence remains unresolved.",
+                evidence=(),
+                requirements=unresolved,
+                model_rounds=1,
+                mcp_calls=0,
+            ),
+            diagnostics={"stop_reason": "partial"},
+            l2_calls=1,
+            usage={},
+        )
+
+
+class RecoveryCapturingL2(L2Client):
+    def __init__(self, responses) -> None:
+        self.responses = deque(responses)
+        self.calls = []
+
+    def complete(
+        self,
+        messages,
+        *,
+        deadline,
+        tools=None,
+        tool_choice=None,
+        recovery_messages=None,
+    ):
+        self.calls.append(
+            {
+                "messages": [dict(message) for message in messages],
+                "tools": list(tools or ()),
+                "recovery_messages": [dict(message) for message in recovery_messages or ()],
+            }
+        )
+        if not self.responses:
+            raise AssertionError("RecoveryCapturingL2 received an unexpected call")
+        return self.responses.popleft()
+
+
 class DriverTests(unittest.TestCase):
     def test_direct_answer_uses_full_history(self) -> None:
-        settings = Settings(enable_high_risk_review=False, lunit_fm_api_key="test")
+        settings = Settings(
+            enable_high_risk_review=False,
+            review_policy="off",
+            lunit_fm_api_key="test",
+        )
         l2 = ScriptedL2([l2_content("최종 L2 답변")])
         driver = ConversationDriver(settings, l2=l2, retrieval=NeverRetrieval())  # type: ignore[arg-type]
         result = driver.complete(
@@ -109,7 +175,12 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(result.trace["lane"], "DIRECT")
 
     def test_direct_answer_succeeds_without_global_request_deadline(self) -> None:
-        settings = Settings(enable_high_risk_review=False, lunit_fm_api_key="test", request_timeout_sec=None)  # type: ignore[arg-type]
+        settings = Settings(
+            enable_high_risk_review=False,
+            review_policy="off",
+            lunit_fm_api_key="test",
+            request_timeout_sec=None,
+        )  # type: ignore[arg-type]
         l2 = ScriptedL2([l2_content("데드라인 없이도 최종 답변")])
         driver = ConversationDriver(settings, l2=l2, retrieval=NeverRetrieval())  # type: ignore[arg-type]
         result = driver.complete(
@@ -122,7 +193,8 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(result.content, "데드라인 없이도 최종 답변")
 
     def test_generation_retrieval_generation_path(self) -> None:
-        settings = Settings(enable_high_risk_review=False, 
+        settings = Settings(enable_high_risk_review=False,
+            review_policy="off",
             lunit_fm_api_key="test",
             max_retrieval_model_rounds=3,
             max_generation_retrievals=1,
@@ -313,7 +385,11 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(run.outcome.evidence[0].cite_uid, "cite-guideline")
 
     def test_retrieval_failure_still_returns_final_l2_answer(self) -> None:
-        settings = Settings(enable_high_risk_review=False, lunit_fm_api_key="test")
+        settings = Settings(
+            enable_high_risk_review=False,
+            review_policy="off",
+            lunit_fm_api_key="test",
+        )
         generation_l2 = ScriptedL2(
             [
                 l2_tool_call(
@@ -347,10 +423,11 @@ class DriverTests(unittest.TestCase):
             for message in generation_l2.calls[1]["messages"]
             if message.get("role") == "tool"
         )
-        self.assertIn('"status": "no_evidence"', tool_message["content"])
+        self.assertEqual(json.loads(tool_message["content"])["status"], "no_evidence")
 
     def test_retrieval_uses_its_own_stage_budget_without_global_deadline(self) -> None:
-        settings = Settings(enable_high_risk_review=False, 
+        settings = Settings(enable_high_risk_review=False,
+            review_policy="off",
             lunit_fm_api_key="test",
             request_timeout_sec=None,  # type: ignore[arg-type]
             retrieval_timeout_sec=0.05,
@@ -391,6 +468,167 @@ class DriverTests(unittest.TestCase):
         self.assertGreater(retrieval.remaining, 0)
         self.assertLessEqual(retrieval.remaining, 0.05)
         self.assertEqual(result.content, "검색 실패 후에도 L2가 생성한 최종 답변")
+
+    def test_partial_retrieval_keeps_the_second_retrieval_path_open(self) -> None:
+        settings = Settings(
+            lunit_fm_api_key="test",
+            max_generation_retrievals=2,
+            review_policy="off",
+        )
+        l2 = ScriptedL2(
+            [
+                l2_tool_call(
+                    "gen-call",
+                    "retrieve_relevant_content",
+                    {
+                        "query": (
+                            "와파린과 이부프로펜 상호작용과 와파린 허가 적응증"
+                        )
+                    },
+                ),
+                l2_content("부족한 근거를 명시한 최종 답변"),
+            ]
+        )
+        retrieval = PartialRetrieval()
+        driver = ConversationDriver(settings, l2=l2, retrieval=retrieval)  # type: ignore[arg-type]
+
+        driver.complete(
+            ChatCompletionRequest(
+                model=settings.model,
+                messages=(
+                    {
+                        "role": "user",
+                        "content": (
+                            "와파린과 이부프로펜의 상호작용은 무엇인가요? "
+                            "그리고 와파린의 허가 적응증은 무엇인가요?"
+                        ),
+                    },
+                ),
+            ),
+            request_id="req-partial-open",
+        )
+
+        second_tool_names = {
+            tool["function"]["name"] for tool in l2.calls[1]["tools"]
+        }
+        self.assertIn("retrieve_relevant_content", second_tool_names)
+        self.assertFalse(
+            any(
+                message.get("role") == "system"
+                and "Retrieval is complete" in str(message.get("content", ""))
+                for message in l2.calls[1]["messages"]
+            )
+        )
+        self.assertEqual(len(retrieval.requirements), 2)
+
+    def test_post_retrieval_recovery_packet_preserves_grounding(self) -> None:
+        settings = Settings(
+            lunit_fm_api_key="test",
+            max_generation_retrievals=2,
+            review_policy="off",
+        )
+        l2 = RecoveryCapturingL2(
+            [
+                l2_tool_call(
+                    "gen-call",
+                    "retrieve_relevant_content",
+                    {
+                        "query": "CKD 성인의 현재 혈압 목표",
+                        "requirements": [
+                            {
+                                "id": "target",
+                                "claim_or_question": "CKD 성인의 현재 혈압 목표",
+                                "criticality": "critical",
+                            }
+                        ],
+                    },
+                ),
+                l2_content("근거 상태를 반영한 최종 답변"),
+            ]
+        )
+        driver = ConversationDriver(
+            settings,
+            l2=l2,
+            retrieval=PartialRetrieval(),  # type: ignore[arg-type]
+        )
+
+        driver.complete(
+            ChatCompletionRequest(
+                model=settings.model,
+                messages=({"role": "user", "content": "CKD의 현재 혈압 목표는?"},),
+            ),
+            request_id="req-grounded-recovery",
+        )
+
+        recovery_packet = json.loads(l2.calls[1]["recovery_messages"][-1]["content"])
+        self.assertEqual(len(recovery_packet["grounding_payloads"]), 1)
+        self.assertIn('"status":"partial"', recovery_packet["grounding_payloads"][0])
+        self.assertIn("requirements", recovery_packet["grounding_payloads"][0])
+
+    def test_disabling_high_risk_review_does_not_disable_evidence_review(self) -> None:
+        settings = Settings(
+            lunit_fm_api_key="test",
+            enable_high_risk_review=False,
+            review_policy="conditional",
+            max_generation_retrievals=1,
+        )
+        l2 = ScriptedL2(
+            [
+                l2_tool_call(
+                    "gen-call",
+                    "retrieve_relevant_content",
+                    {
+                        "query": "CKD 성인의 현재 혈압 목표",
+                        "requirements": [
+                            {
+                                "id": "target",
+                                "claim_or_question": "CKD 성인의 현재 혈압 목표",
+                                "criticality": "critical",
+                            }
+                        ],
+                    },
+                ),
+                l2_content("초안"),
+                l2_content("PASS"),
+            ]
+        )
+        driver = ConversationDriver(
+            settings,
+            l2=l2,
+            retrieval=PartialRetrieval(),  # type: ignore[arg-type]
+        )
+
+        result = driver.complete(
+            ChatCompletionRequest(
+                model=settings.model,
+                messages=({"role": "user", "content": "CKD의 현재 혈압 목표는?"},),
+            ),
+            request_id="req-independent-review",
+        )
+
+        self.assertTrue(result.trace["reviewed"])
+        self.assertIn("partial_critical_evidence", result.trace["review_reasons"])
+        self.assertNotIn("active_high_risk", result.trace["review_reasons"])
+
+    def test_negated_risk_stays_direct_in_the_final_trace(self) -> None:
+        settings = Settings(lunit_fm_api_key="test", review_policy="off")
+        driver = ConversationDriver(
+            settings,
+            l2=ScriptedL2([l2_content("일반적인 감기 설명")]),
+            retrieval=NeverRetrieval(),  # type: ignore[arg-type]
+        )
+
+        result = driver.complete(
+            ChatCompletionRequest(
+                model=settings.model,
+                messages=(
+                    {"role": "user", "content": "저는 임신이 아니에요. 감기는 왜 생기나요?"},
+                ),
+            ),
+            request_id="req-negated-risk",
+        )
+
+        self.assertEqual(result.trace["lane"], "DIRECT")
 
 
 if __name__ == "__main__":

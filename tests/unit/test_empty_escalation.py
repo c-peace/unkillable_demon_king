@@ -60,6 +60,31 @@ class EmptyEscalationTest(unittest.TestCase):
         _client()._escalate_on_empty(payload, 2)
         self.assertEqual(len(payload["messages"]), 10)
 
+    def test_stateful_recovery_never_falls_back_to_lossy_turn_trimming(self) -> None:
+        client = L2Client(Settings(lunit_fm_api_key="test", empty_recovery_policy="stateful"))
+        recovery = [
+            {"role": "system", "content": "base instructions"},
+            {
+                "role": "user",
+                "content": "safety_facts: warfarin; correction: not pregnant",
+            },
+        ]
+
+        second = client._escalate_on_empty(
+            BASE,
+            1,
+            recovery_messages=recovery,
+        )
+        third = client._escalate_on_empty(
+            BASE,
+            2,
+            recovery_messages=recovery,
+        )
+
+        self.assertEqual(second["messages"], recovery)
+        self.assertEqual(third["messages"][:2], recovery)
+        self.assertIn("without dropping any safety fact", third["messages"][-1]["content"])
+
     def test_config_allows_three_attempts(self) -> None:
         self.assertEqual(Settings().empty_output_retries + 1, 3)
 

@@ -20,6 +20,7 @@ from app.contracts import (
     parse_chat_completion_request,
 )
 from app.errors import AppError
+from app.observability import set_request_id
 from app.orchestration.driver import ConversationDriver
 from app.orchestration.retrieval import RetrievalEngine
 
@@ -163,11 +164,31 @@ class DriverRequestHandler(BaseHTTPRequestHandler):
 
     def _request_id(self) -> str:
         supplied = self.headers.get("X-Request-ID", "")
-        if supplied and len(supplied) <= 128 and supplied.isascii():
-            return supplied
-        return f"req-{uuid.uuid4().hex}"
+        if (
+            supplied
+            and len(supplied) <= 128
+            and supplied.isascii()
+            and supplied.isprintable()
+        ):
+            request_id = supplied
+        else:
+            request_id = f"req-{uuid.uuid4().hex}"
+        set_request_id(request_id)
+        return request_id
 
     def _send_error_payload(self, error: AppError, request_id: str) -> None:
+        LOGGER.warning(
+            json.dumps(
+                {
+                    "request_id": request_id,
+                    "state": "failed",
+                    "error_code": error.code,
+                    "status_code": error.status_code,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        )
         self._send_json(error.status_code, error.to_payload(), request_id)
 
     def _send_json(self, status: int, payload: Any, request_id: str) -> None:

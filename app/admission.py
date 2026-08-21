@@ -1,36 +1,15 @@
-"""Deciding whether evidence should be acquired at all, before any tool is offered.
+"""Decide whether current or official external evidence is required before generation.
 
-The model cannot make this call. Choosing to search looks free from inside a single turn,
-so a model asked "would evidence help here?" will nearly always say yes — it has no way to
-know that the search costs a round trip against a shared endpoint, and no way to know what
-happens to its own answer afterwards. Measured on the same 150 conversations with retrieval
-forced on and forced off:
-
-    router recognised a domain    n=54   on 0.480   off 0.481   Δ +0.001
-    router recognised nothing     n=96   on 0.513   off 0.556   Δ +0.043
-
-Where the corpus has something to say, searching is free. Where it does not, searching
-costs 0.043 — because thin, off-topic evidence does not sit quietly beside the answer, it
-displaces knowledge the model already had.
-
-An earlier attempt closed this off inside the retrieval controller, and lost 0.034 rather
-than gaining anything. By then the model had already called the tool and watched it come
-back empty, and an answer written after a failed search is a smaller answer. So the
-decision has to be made before the generation request is built: on the memory lane the
-model is never shown `retrieve_relevant_content`, and nothing in the prompt records that a
-search was considered. That path has to be indistinguishable, from the model's side, from
-one where retrieval was never part of the system.
-
-The test is not whether a question is clinical. "Why does hypertension develop?" is a
-clinical question and belongs on the memory lane; "what blood pressure target do the
-current guidelines give for CKD?" is the same subject and does not. The test is whether
-answering correctly needs current or official state that does not live in the model's
-parameters — an approval, a reimbursement rule, a statute, a label, a published figure.
+Retrieval is useful for mutable external state such as guidelines, labels, approvals,
+reimbursement, codes, statutes, and published research. Ordinary explanation, triage, and
+self-care can usually stay on the memory lane. The state planner supplies resolved follow-up
+context; the regex router remains a conservative signal and legacy fallback.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+from app.conversation import ConversationState
 from app.evidence.routing import SourceRouter
 
 
@@ -66,10 +45,21 @@ class Admission:
         return "evidence" if self.admitted else "memory"
 
 
-def admit(user_text: str, router: SourceRouter | None = None) -> Admission:
-    """Decide the lane for one turn from the question alone."""
-    if not user_text or not user_text.strip():
+def _context_text(state: ConversationState) -> str:
+    parts = [state.latest_user_turn]
+    if state.has_follow_up_reference:
+        parts.extend(state.prior_user_turns[-2:])
+    return "\n".join(part for part in parts if part).strip()
+
+
+def admit(user_text: str | ConversationState, router: SourceRouter | None = None) -> Admission:
+    """Decide whether evidence may be acquired for this turn."""
+    if isinstance(user_text, ConversationState):
+        question = _context_text(user_text)
+    else:
+        question = user_text
+    if not question or not question.strip():
         return Admission(())
     resolved = router or SourceRouter("route")
-    domains = tuple(d for d in resolved.routes(user_text) if d in _STATE_DEPENDENT)
+    domains = tuple(d for d in resolved.routes(question) if d in _STATE_DEPENDENT)
     return Admission(domains)

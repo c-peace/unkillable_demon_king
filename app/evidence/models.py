@@ -7,6 +7,7 @@ from typing import Any, Iterable, Mapping
 
 
 VALID_RETRIEVAL_STATUSES = {"sufficient", "partial", "no_evidence"}
+VALID_REQUIREMENT_STATUSES = {"missing", "supported", "contradicted", "unresolved"}
 
 
 def _first_string(mapping: Mapping[str, Any], keys: Iterable[str]) -> str:
@@ -154,10 +155,29 @@ class CitableItem:
 class EvidenceRequirement:
     id: str
     claim_or_question: str
+    source_preference: str = ""
+    clinical_constraints: str = ""
     criticality: str = "critical"
     status: str = "missing"
     cite_uids: tuple[str, ...] = ()
     gap_reason: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceRequirementLedger:
+    requirements: tuple[EvidenceRequirement, ...]
+
+    @property
+    def primary(self) -> EvidenceRequirement:
+        return self.requirements[0]
+
+    def unresolved_critical(self) -> tuple[EvidenceRequirement, ...]:
+        return tuple(
+            requirement
+            for requirement in self.requirements
+            if requirement.criticality == "critical"
+            and requirement.status != "supported"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,9 +186,17 @@ class RetrievalOutcome:
     items: tuple[CitableItem, ...]
     note: str
     evidence: tuple[EvidenceItem, ...]
-    requirement: EvidenceRequirement
+    requirements: tuple[EvidenceRequirement, ...]
     model_rounds: int
     mcp_calls: int
+
+    @property
+    def requirement(self) -> EvidenceRequirement:
+        return self.requirements[0]
+
+    @property
+    def ledger(self) -> EvidenceRequirementLedger:
+        return EvidenceRequirementLedger(self.requirements)
 
     def to_generation_payload(self, *, max_chars: int) -> str:
         score_by_id = {item.cite_uid: item.relevance_score for item in self.items}
@@ -176,9 +204,23 @@ class RetrievalOutcome:
             item.to_generation_record(score_by_id.get(item.cite_uid, 0.0))
             for item in self.evidence
         ]
+        requirement_records = [
+            {
+                "id": requirement.id,
+                "claim_or_question": requirement.claim_or_question,
+                "source_preference": requirement.source_preference,
+                "clinical_constraints": requirement.clinical_constraints,
+                "criticality": requirement.criticality,
+                "status": requirement.status,
+                "cite_uids": list(requirement.cite_uids),
+                "gap_reason": requirement.gap_reason,
+            }
+            for requirement in self.requirements
+        ]
         payload = {
             "status": self.status,
             "note": self.note,
+            "requirements": requirement_records,
             "requirement": {
                 "claim_or_question": self.requirement.claim_or_question,
                 "status": self.requirement.status,
@@ -218,6 +260,91 @@ class RetrievalOutcome:
         return json.dumps(reduced, ensure_ascii=False, separators=(",", ":"))
 
 
+def default_requirement_ledger(
+    query: str,
+    *,
+    requirements: Iterable[EvidenceRequirement] | None = None,
+) -> EvidenceRequirementLedger:
+    if requirements is None:
+        return EvidenceRequirementLedger(
+            (
+                EvidenceRequirement(
+                    id="req-1",
+                    claim_or_question=query,
+                ),
+            )
+        )
+
+    normalized: list[EvidenceRequirement] = []
+    seen: set[str] = set()
+    for requirement in requirements:
+        identifier = requirement.id.strip()
+        if not identifier or identifier in seen:
+            continue
+        seen.add(identifier)
+        normalized.append(
+            EvidenceRequirement(
+                id=identifier,
+                claim_or_question=requirement.claim_or_question.strip() or query,
+                source_preference=requirement.source_preference.strip(),
+                clinical_constraints=requirement.clinical_constraints.strip(),
+                criticality=requirement.criticality.strip() or "critical",
+                status=(
+                    requirement.status
+                    if requirement.status in VALID_REQUIREMENT_STATUSES
+                    else "missing"
+                ),
+                cite_uids=tuple(
+                    cite_uid.strip()
+                    for cite_uid in requirement.cite_uids
+                    if isinstance(cite_uid, str) and cite_uid.strip()
+                ),
+                gap_reason=requirement.gap_reason.strip(),
+            )
+        )
+    if not normalized:
+        return default_requirement_ledger(query)
+    return EvidenceRequirementLedger(tuple(normalized))
+
+
+def _outcome_requirement(
+    requirement: EvidenceRequirement,
+    *,
+    status: str,
+    cite_uids: tuple[str, ...],
+    note: str,
+) -> EvidenceRequirement:
+    if status == "sufficient" and cite_uids:
+        return EvidenceRequirement(
+            id=requirement.id,
+            claim_or_question=requirement.claim_or_question,
+            source_preference=requirement.source_preference,
+            clinical_constraints=requirement.clinical_constraints,
+            criticality=requirement.criticality,
+            status="supported",
+            cite_uids=cite_uids,
+            gap_reason="",
+        )
+    return EvidenceRequirement(
+        id=requirement.id,
+        claim_or_question=requirement.claim_or_question,
+        source_preference=requirement.source_preference,
+        clinical_constraints=requirement.clinical_constraints,
+        criticality=requirement.criticality,
+        status="unresolved",
+        cite_uids=cite_uids,
+        gap_reason=note or "Evidence remained incomplete.",
+    )
+
+
+def _append_note(note: str, message: str) -> str:
+    if not message:
+        return note
+    if not note:
+        return message
+    return f"{note} {message}".strip()
+
+
 def parse_final_selection(
     arguments: Mapping[str, Any],
     *,
@@ -226,15 +353,20 @@ def parse_final_selection(
     model_rounds: int,
     mcp_calls: int,
     max_items: int,
+    requirements: Iterable[EvidenceRequirement] | None = None,
 ) -> RetrievalOutcome:
     raw_status = arguments.get("status")
     if raw_status not in VALID_RETRIEVAL_STATUSES:
         raise ValueError("invalid finalize_retrieval status")
     note_value = arguments.get("note", "")
     note = note_value.strip()[:2_000] if isinstance(note_value, str) else ""
-    raw_items = arguments.get("items", [])
+    ledger = default_requirement_ledger(query, requirements=requirements)
+    raw_items = arguments.get("selected_items", arguments.get("items", []))
     if not isinstance(raw_items, list):
         raise ValueError("finalize_retrieval items must be an array")
+    raw_requirements = arguments.get("requirements")
+    if raw_requirements is not None and not isinstance(raw_requirements, list):
+        raise ValueError("finalize_retrieval requirements must be an array")
 
     selected: list[CitableItem] = []
     unknown: list[str] = []
@@ -268,29 +400,150 @@ def parse_final_selection(
         status = "partial" if len(registry) else "no_evidence"
     if unknown:
         suffix = f"Unknown cite_uids were rejected: {', '.join(unknown[:3])}."
-        note = f"{note} {suffix}".strip()
+        note = _append_note(note, suffix)
         if status == "sufficient":
             status = "partial" if selected or len(registry) else "no_evidence"
+
+    selected_cite_uids = tuple(item.cite_uid for item in selected)
+    selected_cite_uid_set = set(selected_cite_uids)
+    updates_by_id: dict[str, EvidenceRequirement] = {}
+    unknown_requirement_ids: list[str] = []
+    rejected_requirement_cites: list[str] = []
+    duplicate_requirement_ids: list[str] = []
+    if raw_requirements is None:
+        finalized_requirements = tuple(
+            _outcome_requirement(
+                requirement,
+                status=status if requirement.id == ledger.primary.id else "partial",
+                cite_uids=selected_cite_uids if requirement.id == ledger.primary.id else (),
+                note=note,
+            )
+            for requirement in ledger.requirements
+        )
+    else:
+        expected_by_id = {requirement.id: requirement for requirement in ledger.requirements}
+        for raw_requirement in raw_requirements:
+            if not isinstance(raw_requirement, Mapping):
+                continue
+            identifier = raw_requirement.get("id")
+            if not isinstance(identifier, str) or not identifier.strip():
+                unknown_requirement_ids.append("<missing>")
+                continue
+            requirement_id = identifier.strip()
+            if requirement_id in updates_by_id:
+                duplicate_requirement_ids.append(requirement_id)
+                continue
+            expected = expected_by_id.get(requirement_id)
+            if expected is None:
+                unknown_requirement_ids.append(requirement_id)
+                continue
+            requirement_status = raw_requirement.get("status", expected.status)
+            if requirement_status not in VALID_REQUIREMENT_STATUSES:
+                requirement_status = "unresolved"
+            raw_cite_uids = raw_requirement.get("cite_uids", list(expected.cite_uids))
+            cite_uids: list[str] = []
+            if raw_cite_uids is None:
+                raw_cite_uids = []
+            if not isinstance(raw_cite_uids, list):
+                rejected_requirement_cites.append(f"{requirement_id}:<invalid-array>")
+                raw_cite_uids = []
+                requirement_status = "unresolved"
+            for raw_cite_uid in raw_cite_uids:
+                if not isinstance(raw_cite_uid, str) or not raw_cite_uid.strip():
+                    continue
+                cite_uid = raw_cite_uid.strip()
+                if (
+                    registry.get(cite_uid) is None
+                    or cite_uid not in selected_cite_uid_set
+                    or cite_uid in cite_uids
+                ):
+                    rejected_requirement_cites.append(f"{requirement_id}:{cite_uid}")
+                    requirement_status = "unresolved"
+                    continue
+                cite_uids.append(cite_uid)
+            if requirement_status in {"supported", "contradicted"} and not cite_uids:
+                requirement_status = "unresolved"
+            gap_reason_value = raw_requirement.get("gap_reason", expected.gap_reason)
+            gap_reason = gap_reason_value.strip()[:500] if isinstance(gap_reason_value, str) else ""
+            if requirement_status == "unresolved" and not gap_reason:
+                gap_reason = note or "Evidence remained incomplete."
+            if requirement_status == "supported":
+                gap_reason = ""
+            updates_by_id[requirement_id] = EvidenceRequirement(
+                id=expected.id,
+                claim_or_question=expected.claim_or_question,
+                source_preference=expected.source_preference,
+                clinical_constraints=expected.clinical_constraints,
+                criticality=expected.criticality,
+                status=requirement_status,
+                cite_uids=tuple(cite_uids),
+                gap_reason=gap_reason,
+            )
+
+        finalized_requirements = tuple(
+            updates_by_id.get(
+                requirement.id,
+                EvidenceRequirement(
+                    id=requirement.id,
+                    claim_or_question=requirement.claim_or_question,
+                    source_preference=requirement.source_preference,
+                    clinical_constraints=requirement.clinical_constraints,
+                    criticality=requirement.criticality,
+                    status="unresolved",
+                    cite_uids=(),
+                    gap_reason=note or "Requirement was not closed by finalize_retrieval.",
+                ),
+            )
+            for requirement in ledger.requirements
+        )
+        if unknown_requirement_ids:
+            note = _append_note(
+                note,
+                "Unknown requirement ids were rejected: "
+                + ", ".join(unknown_requirement_ids[:3])
+                + ".",
+            )
+        if duplicate_requirement_ids:
+            note = _append_note(
+                note,
+                "Duplicate requirement ids were ignored: "
+                + ", ".join(duplicate_requirement_ids[:3])
+                + ".",
+            )
+        if rejected_requirement_cites:
+            note = _append_note(
+                note,
+                "Requirement cite_uids were rejected: "
+                + ", ".join(rejected_requirement_cites[:3])
+                + ".",
+            )
+
+    unresolved_critical = tuple(
+        requirement
+        for requirement in finalized_requirements
+        if requirement.criticality == "critical"
+        and requirement.status != "supported"
+    )
+    if status == "sufficient" and unresolved_critical:
+        status = "partial" if selected or len(registry) else "no_evidence"
+        note = _append_note(
+            note,
+            "Critical requirements remained unresolved: "
+            + ", ".join(requirement.id for requirement in unresolved_critical[:3])
+            + ".",
+        )
 
     evidence = tuple(
         item
         for selection in selected
         if (item := registry.get(selection.cite_uid)) is not None
     )
-    requirement_status = "supported" if status == "sufficient" and evidence else "unresolved"
-    gap_reason = "" if requirement_status == "supported" else note or "Evidence remained incomplete."
     return RetrievalOutcome(
         status=status,
         items=tuple(selected),
         note=note,
         evidence=evidence,
-        requirement=EvidenceRequirement(
-            id="req-1",
-            claim_or_question=query,
-            status=requirement_status,
-            cite_uids=tuple(item.cite_uid for item in selected),
-            gap_reason=gap_reason,
-        ),
+        requirements=finalized_requirements,
         model_rounds=model_rounds,
         mcp_calls=mcp_calls,
     )
@@ -300,6 +553,7 @@ def fallback_selection(
     *,
     registry: EvidenceRegistry,
     query: str,
+    requirements: Iterable[EvidenceRequirement] | None = None,
     note: str,
     model_rounds: int,
     mcp_calls: int,
@@ -308,17 +562,20 @@ def fallback_selection(
     evidence = registry.all()[:max_items]
     items = tuple(CitableItem(item.cite_uid, 0.0) for item in evidence)
     status = "partial" if evidence else "no_evidence"
+    ledger = default_requirement_ledger(query, requirements=requirements)
     return RetrievalOutcome(
         status=status,
         items=items,
         note=note,
         evidence=evidence,
-        requirement=EvidenceRequirement(
-            id="req-1",
-            claim_or_question=query,
-            status="unresolved",
-            cite_uids=tuple(item.cite_uid for item in evidence),
-            gap_reason=note,
+        requirements=tuple(
+            _outcome_requirement(
+                requirement,
+                status=status,
+                cite_uids=tuple(item.cite_uid for item in evidence),
+                note=note,
+            )
+            for requirement in ledger.requirements
         ),
         model_rounds=model_rounds,
         mcp_calls=mcp_calls,

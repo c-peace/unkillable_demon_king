@@ -1,19 +1,19 @@
 # Current State
 
-Last updated: 2026-08-21 (Asia/Seoul)
+Last updated: 2026-08-22 (Asia/Seoul)
 
 ## Current objective
 
-Harden and evaluate the implemented Lunit L2 multi-turn conversation driver, then prepare a reproducible evaluator-compatible container and final submission branch.
+Validate the corrected stateful planner, atomic retrieval ledger, conditional review, evidence-preserving recovery, and request-correlated observability before the next benchmark run.
 
 ## Current phase
 
-**The repeated CoEval failure was traced to missing evaluation-time API-key injection.** The organizer confirmed that the evaluator only runs the image and provides no separate credential mechanism. The submission now bundles repository-root `.env` as `/app/submission.env`; an explicit runtime `LUNIT_FM_API_KEY` still overrides it. A no-env Docker run returned HTTP `200` from both `/v1/models` and live `/v1/chat/completions`.
+**The release-blocking orchestration gaps found in post-implementation review are closed in code and protected by synthetic regressions.** Retrieval remains open after partial evidence and closes only on sufficiency or budget exhaustion; atomic requirements are mandatory at the tool boundary and deterministically seeded from explicit evidence asks; post-retrieval recovery retains grounding payloads; and planner/review boundaries now handle negation, omitted medication names, elliptical follow-ups, text operations, and independent review flags consistently. Live L2/MCP behavior and benchmark impact remain to be measured.
 
 ## Workspace status
 
 - Git remote `origin` is connected to `https://github.com/c-peace/unkillable_demon_king.git`.
-- The current local branch is `baseline` and tracks `origin/baseline`.
+- The current local branch is `6_00_BestModel` and tracks `origin/6_00_BestModel`.
 - The latest fetched submission branch was `origin/lunit/hackathon-submission` at `def09916b1ce14a82bb5f223de59b3aa8583d0ca` before the fail-soft latency changes; a new submission SHA is still required after verification and publish.
 - `README.md` is the public architecture, requirements, runbook, and implementation-status document.
 - `app/` contains a Python 3.13-compatible, standard-library-only service; root `Dockerfile`, `.dockerignore`, `.env.example`, synthetic tests, smoke test, and Patient Simulator development script now exist.
@@ -49,6 +49,9 @@ Harden and evaluate the implemented Lunit L2 multi-turn conversation driver, the
 - Tightened the latency-oriented default runtime after the evaluator failure analysis: the shared request deadline stays disabled by default, retrieval uses compact family routing plus smaller evidence budgets, repeated identical MCP calls are cached within a request, retrieval prompts now expose explicit remaining budgets, and bounded retrieval failure no longer forwards internal error codes into final-generation context.
 - Hardened the generation/retrieval boundary against a live L2 edge case: when L2 emits legacy text-encoded tool-call markup instead of standard `message.tool_calls`, the adapter now normalizes it, and the post-retrieval generation prompt explicitly forbids any further tool usage once evidence collection is closed.
 - Added fail-soft evaluation controls after repeated `coeval_failed` container termination: L2 uses one 60-second attempt by default, timeout requests are never duplicated, empty-output retry defaults to zero, retrieval has a separate 30-second stage budget, retrieval defaults to two L2 rounds and three MCP calls, and L2 output is capped at 4096 tokens.
+- Implemented the targeted harness-remediation slice for planner/retrieval/review/recovery: conversation compilation now produces request-local state with follow-up references, safety facts, corrections, and explicit asks; admission can read that state; generation can choose between answer-only and answer-plus-question commit contracts; retrieval accepts requirement ledgers and validates `finalize_retrieval` against known requirement ids and selected citations; conditional review uses structured defects and reason-based triggering; empty-output recovery can switch to a stateful recovery packet instead of blindly trimming turns.
+- Added privacy-safe request-correlated observability with `contextvars`, structured planner/retrieval/review/recovery fields in the final trace, and no raw conversation, evidence, response, or credential logging.
+- Closed the post-review planner and orchestration gaps: partial retrieval no longer receives a retrieval-closed prompt, explicit multi-part evidence asks seed atomic ledger requirements even when generation omits them, recovery packets retain compact grounding payloads, generic dose questions require a medication name, mixed negated/active risks stay distinguishable, medication ellipsis follow-ups resolve against prior turns, text operations do not inherit quoted clinical risk, broad triage wording no longer implies guideline retrieval, and high-risk review can be disabled without suppressing evidence/history/format review.
 - Verified the development L2 endpoint with a basic request and the standard OpenAI non-streaming tool-call/tool-result continuation contract. The endpoint can return `finish_reason: "stop"` alongside `message.tool_calls`, and the adapter correctly uses the latter as authoritative.
 - Discovered all 21 live MCP schemas, negotiated protocol `2025-03-26`, observed successful stateless JSON calls, and validated the structured `index_get_page_content` citation shape.
 - Completed a general synthetic guideline request through Generation -> Retrieval L2 -> three MCP calls -> `finalize_retrieval` -> final L2 generation, selecting four evidence items without retaining raw clinical content in project state.
@@ -78,6 +81,7 @@ Harden and evaluate the implemented Lunit L2 multi-turn conversation driver, the
 - Do not adopt paper-specific specialty branches, exact length targets, hard-coded benchmark anchors, or blanket safety gates.
 - Implement SEMA-style interpretation/exploration/adjudication initially inside one retrieval-stage L2 loop backed by a harness-validated Evidence Requirement Ledger; do not multiply L2 agents unless ablation shows a benefit.
 - Treat `finalize_retrieval(status="sufficient")` as a validated completion decision over critical evidence requirements, not as a model's unverified impression that search results look adequate.
+- Keep the planner, retrieval ledger, review, and empty-response recovery boundaries independently switchable through policy flags so each advanced layer can be ablated without rewriting the transport or MCP path.
 
 ## Verification evidence
 
@@ -115,6 +119,13 @@ Harden and evaluate the implemented Lunit L2 multi-turn conversation driver, the
 - A fresh local container run on host port `18004` returned `/healthz` and completed a live grounded request in 46.131 seconds with HTTP `200`, `l2_calls=2`, `retrieval_l2_calls=1`, `mcp_calls=2`, `retrieval_status=partial`, `evidence_count=1`, and `total_tokens=4629`. The final assistant content contained no raw `<tool_call>` markup, confirming that the legacy tool-call normalization plus post-retrieval prompt closed the observed leakage path.
 - The submission-equivalent image started successfully under the evaluator's `docker start --attach` pattern. Without a secret, `/v1/models` returned 200 and chat returned a bounded 503 while the process stayed alive; SIGTERM produced exit code 0. A separate 128 MiB container completed 64 concurrent synthetic three-second L2 requests with HTTP 200 and about 28.6 MiB observed memory, weakening startup and ordinary-concurrency OOM hypotheses.
 - The fail-soft image rebuilt without cache in 1.58 seconds and started under `docker start --attach`. A live grounded request completed with HTTP 200 in 31.87 seconds: generation 17.36 seconds, retrieval 14.51 seconds, one retrieval L2 call, two MCP calls, one evidence item, and no retries. A separate source-sensitive question that L2 answered without retrieval took 27.90 seconds entirely in one L2 call. These measurements identify L2 latency as the dominant cost and MCP call latency as secondary. SIGTERM again produced exit code 0 with no OOM flag.
+- `python3 -m py_compile app/conversation.py app/admission.py app/clients/l2.py app/evidence/models.py app/orchestration/planning.py app/orchestration/retrieval.py app/orchestration/review.py app/orchestration/driver.py` completed without syntax errors after the harness-remediation implementation.
+- `python3 -m unittest tests.unit.test_admission tests.unit.test_conversation_evidence tests.unit.test_empty_escalation tests.unit.test_driver tests.unit.test_retrieval_progression tests.unit.test_config_contracts` passed 46 tests after the planner/retrieval/review/recovery changes.
+- `python3 -m unittest discover -s tests/unit -q` passed all 72 unit tests after adding state-planner regressions for follow-up routing, stale-domain isolation, explicit risk negation, and conditional clarification.
+- `python3 -m unittest discover -s tests/integration -v` passed all 8 loopback HTTP/L2/MCP integration tests when run with local-bind permission.
+- `python3 -m unittest discover -s tests -q` passed all 82 unit and integration tests together, including stateful recovery and contradicted-critical-evidence regressions; `python3 -m compileall -q app tests` and `git diff --check` also completed successfully.
+- After the post-review fixes, `python3 -m unittest discover -s tests -q` passed all 93 unit and integration tests, including new regressions for the second-retrieval transition, atomic plan requirements, grounding-preserving recovery, generic-dose clarification, ellipsis follow-ups, mixed negation, text-operation isolation, narrower review triggering, independent review flags, and final-lane consistency. `python3 -m compileall -q app tests` and `git diff --check` also passed.
+- `docker build -t lunit-hackathon-driver:review-fix .` completed in 1.27 seconds after the post-review fixes. Docker repeated the existing `SecretsUsedInArgOrEnv` warning for the credential environment-variable declaration; the build itself succeeded and the warning was not introduced by this remediation slice.
 
 ## Open questions and blockers
 
@@ -131,11 +142,9 @@ Harden and evaluate the implemented Lunit L2 multi-turn conversation driver, the
 
 ## Next actions
 
-1. Commit the dedicated submission `.env` with the bundled-key loader, publish a new submission-branch SHA, and run a dashboard trial.
-3. Add synthetic high-risk pediatric triage regressions based on general clinical capabilities, not the public HealthBench example, and evaluate whether conditional review improves escalation without blanket over-triage.
-4. Add an automated privacy-safe connected smoke path that distinguishes transient upstream failures from deterministic contract failures without logging content or credentials.
-5. Run Patient Simulator, systematic ablations, and dashboard aggregate validation before creating the final `lunit/hackathon-submission` branch and verifying the full SHA/model.
-6. Collect the full container stderr from the failed trial, because the current evidence only proves that the container exited with code 1 after `docker start --attach`.
+1. Measure the corrected planner/ledger/review/recovery slice on fast synthetic and dashboard-style prompts.
+2. Run a focused live L2/MCP behavior check for partial-to-second-retrieval and empty post-retrieval recovery.
+3. Run Patient Simulator, systematic ablations, and dashboard aggregate validation before creating the final `lunit/hackathon-submission` branch and verifying the full SHA/model.
 
 ## Update protocol
 

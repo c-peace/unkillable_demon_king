@@ -13,7 +13,9 @@ from app.deadline import Deadline
 from app.errors import AppError
 from app.evidence.models import (
     EvidenceRegistry,
+    EvidenceRequirement,
     RetrievalOutcome,
+    default_requirement_ledger,
     fallback_selection,
     parse_final_selection,
 )
@@ -65,9 +67,49 @@ FINALIZE_RETRIEVAL_TOOL: dict[str, Any] = {
                     },
                     "default": [],
                 },
+                "selected_items": {
+                    "type": "array",
+                    "description": "Preferred alias for items; same shape and meaning.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "cite_uid": {"type": "string"},
+                            "relevance_score": {"type": "number"},
+                        },
+                        "required": ["cite_uid", "relevance_score"],
+                        "additionalProperties": False,
+                    },
+                    "default": [],
+                },
+                "requirements": {
+                    "type": "array",
+                    "description": (
+                        "Optional requirement-level closure for the harness ledger. Only use "
+                        "known requirement ids and cite_uids already returned in selected items."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "status": {
+                                "type": "string",
+                                "enum": ["missing", "supported", "contradicted", "unresolved"],
+                            },
+                            "cite_uids": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "default": [],
+                            },
+                            "gap_reason": {"type": "string", "default": ""},
+                        },
+                        "required": ["id", "status"],
+                        "additionalProperties": False,
+                    },
+                    "default": [],
+                },
                 "note": {"type": "string", "default": ""},
             },
-            "required": ["status", "items"],
+            "required": ["status"],
             "additionalProperties": False,
         },
     },
@@ -79,6 +121,7 @@ class RetrievalRun:
     outcome: RetrievalOutcome
     usage: dict[str, int]
     l2_calls: int
+    diagnostics: Mapping[str, Any] | None = None
 
 
 def _sum_usage(total: dict[str, int], usage: Mapping[str, int]) -> None:
@@ -403,6 +446,7 @@ def _retrieval_user_message(
     max_model_rounds: int,
     max_mcp_tool_calls: int,
     selected_tools: tuple[McpTool, ...],
+    requirements: tuple[EvidenceRequirement, ...],
 ) -> str:
     tool_list = ", ".join(tool.name for tool in selected_tools) if selected_tools else "none"
     selected_names = {tool.name for tool in selected_tools}
@@ -417,7 +461,16 @@ def _retrieval_user_message(
     return (
         "Retrieve evidence for this self-contained question:\n"
         f"{query}\n\n"
-        "Use the shortest authoritative path for the single critical evidence requirement. "
+        "The harness ledger starts with these requirements:\n"
+        + "\n".join(
+            f"- {requirement.id} [{requirement.criticality}] {requirement.claim_or_question}"
+            for requirement in requirements
+        )
+        + "\n"
+        "If you provide requirements in finalize_retrieval, update only known ids and cite "
+        "only cite_uids already selected in items or selected_items. sufficient is valid "
+        "only when every critical requirement is closed.\n"
+        "Use the shortest authoritative path for the named evidence gap. "
         "Prefer exact official tools or exact page reads over broad exploratory search.\n"
         f"{index_path}"
         f"Available MCP tools: {tool_list}\n"
@@ -440,14 +493,22 @@ class RetrievalEngine:
         self._mcp = mcp
         self._router = SourceRouter(settings.mcp_tool_mode)
 
-    def run(self, query: str, *, deadline: Deadline) -> RetrievalRun:
+    def run(
+        self,
+        query: str,
+        *,
+        deadline: Deadline,
+        requirements: tuple[EvidenceRequirement, ...] | None = None,
+    ) -> RetrievalRun:
         registry = EvidenceRegistry()
         usage: dict[str, int] = {}
+        ledger = default_requirement_ledger(query, requirements=requirements)
         if not self._settings.enable_mcp:
             return RetrievalRun(
                 outcome=fallback_selection(
                     registry=registry,
                     query=query,
+                    requirements=ledger.requirements,
                     note="MCP retrieval is disabled.",
                     model_rounds=0,
                     mcp_calls=0,
@@ -464,6 +525,7 @@ class RetrievalEngine:
                 outcome=fallback_selection(
                     registry=registry,
                     query=query,
+                    requirements=ledger.requirements,
                     note="The evidence service was unavailable.",
                     model_rounds=0,
                     mcp_calls=0,
@@ -496,6 +558,7 @@ class RetrievalEngine:
                     max_model_rounds=self._settings.max_retrieval_model_rounds,
                     max_mcp_tool_calls=self._settings.max_mcp_tool_calls,
                     selected_tools=selected_tools,
+                    requirements=ledger.requirements,
                 ),
             },
         ]
@@ -588,6 +651,7 @@ class RetrievalEngine:
                             arguments,
                             registry=registry,
                             query=query,
+                            requirements=ledger.requirements,
                             model_rounds=model_rounds,
                             mcp_calls=mcp_calls + bridge_calls,
                             max_items=self._settings.max_evidence_items,
@@ -611,6 +675,13 @@ class RetrievalEngine:
                         outcome=outcome,
                         usage=usage,
                         l2_calls=model_rounds,
+                        diagnostics={
+                            "stop_reason": "finalized",
+                            "bridge_calls": bridge_calls,
+                            "duplicate_blocked": duplicate_blocked,
+                            "invalid_calls": invalid_calls,
+                            "no_progress": no_progress,
+                        },
                     )
 
                 tool = tool_by_name.get(call.name)
@@ -833,6 +904,7 @@ class RetrievalEngine:
                                         outcome=fallback_selection(
                                             registry=registry,
                                             query=query,
+                                            requirements=ledger.requirements,
                                             note=(
                                                 "Citable indexed page evidence was collected by "
                                                 "the deterministic retrieval bridge."
@@ -843,6 +915,13 @@ class RetrievalEngine:
                                         ),
                                         usage=usage,
                                         l2_calls=model_rounds,
+                                        diagnostics={
+                                            "stop_reason": "bridge_budget_exhausted",
+                                            "bridge_calls": bridge_calls,
+                                            "duplicate_blocked": duplicate_blocked,
+                                            "invalid_calls": invalid_calls,
+                                            "no_progress": no_progress,
+                                        },
                                     )
                             except AppError as exc:
                                 bridge_calls += 1
@@ -912,6 +991,7 @@ class RetrievalEngine:
             outcome=fallback_selection(
                 registry=registry,
                 query=query,
+                requirements=ledger.requirements,
                 note=note,
                 model_rounds=model_rounds,
                 mcp_calls=mcp_calls + bridge_calls,
@@ -919,4 +999,11 @@ class RetrievalEngine:
             ),
             usage=usage,
             l2_calls=model_rounds,
+            diagnostics={
+                "stop_reason": "budget_or_stall",
+                "bridge_calls": bridge_calls,
+                "duplicate_blocked": duplicate_blocked,
+                "invalid_calls": invalid_calls,
+                "no_progress": no_progress,
+            },
         )

@@ -4,14 +4,12 @@ import logging
 import sys
 
 from app.config import Settings
+from app.observability import configure_logging
 from app.server import serve
 
 
 def main() -> int:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
+    configure_logging()
     logger = logging.getLogger("lunit_server")
     try:
         settings = Settings.from_env()

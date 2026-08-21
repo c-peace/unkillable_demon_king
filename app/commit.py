@@ -23,7 +23,18 @@ from typing import Any
 
 QUESTION_FIELD = "one_specific_clinical_question_whose_answer_would_most_change_the_advice"
 
-COMMIT_TOOL: dict[str, Any] = {
+_ANSWER_PROPERTY: dict[str, Any] = {
+    "type": "string",
+    "description": (
+        "The complete final answer in the user's language and requested format. "
+        "Answer every explicit requirement, preserve relevant conversation facts and "
+        "corrections, and give safety or follow-up instructions only when the case calls "
+        "for them. Do not mention this form or the orchestration."
+    ),
+}
+
+
+ANSWER_ONLY_COMMIT_TOOL: dict[str, Any] = {
     "type": "function",
     "function": {
         "name": "commit_response",
@@ -31,16 +42,27 @@ COMMIT_TOOL: dict[str, Any] = {
         "parameters": {
             "type": "object",
             "properties": {
-                "answer": {
-                    "type": "string",
-                    "description": (
-                        "The complete medical answer, as long as it needs to be. Never "
-                        "hold anything back because more context would have helped — say "
-                        "everything you would have said, and branch it where a missing "
-                        "fact would change the advice. If the situation may be urgent, "
-                        "the instruction to seek care comes first."
-                    ),
-                },
+                "answer": _ANSWER_PROPERTY,
+            },
+            "required": ["answer"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+ANSWER_WITH_QUESTION_COMMIT_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "commit_response",
+        "description": (
+            "Submit the complete final medical response and the one decision-changing "
+            "clarification identified by the harness."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "answer": _ANSWER_PROPERTY,
                 QUESTION_FIELD: {
                     "type": "string",
                     "minLength": 10,
@@ -59,6 +81,14 @@ COMMIT_TOOL: dict[str, Any] = {
         },
     },
 }
+
+
+# Compatibility for callers that imported the original always-question contract.
+COMMIT_TOOL = ANSWER_WITH_QUESTION_COMMIT_TOOL
+
+
+def response_commit_tool(*, require_question: bool) -> dict[str, Any]:
+    return ANSWER_WITH_QUESTION_COMMIT_TOOL if require_question else ANSWER_ONLY_COMMIT_TOOL
 
 
 def unpack(arguments: Any) -> tuple[str, str]:

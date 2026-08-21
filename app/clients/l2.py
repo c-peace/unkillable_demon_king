@@ -5,7 +5,7 @@ import logging
 import math
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Mapping, Sequence
 
 from app.clients.http import HttpStatusError, HttpTimeoutError, HttpTransportError, post_json
@@ -30,6 +30,7 @@ class L2Response:
     tool_calls: tuple[ToolCall, ...]
     assistant_message: dict[str, Any]
     usage: dict[str, int]
+    recovery_mode: str = "none"
 
 
 _TEXT_TOOL_CALL_BLOCK = re.compile(
@@ -197,6 +198,7 @@ class L2Client:
         deadline: Deadline,
         tools: Sequence[Mapping[str, Any]] | None = None,
         tool_choice: Any = None,
+        recovery_messages: Sequence[Mapping[str, Any]] | None = None,
     ) -> L2Response:
         key = self._settings.lunit_fm_api_key
         if not key:
@@ -227,15 +229,33 @@ class L2Client:
         # answer, we only change what we ask it with.
         empty_attempts = self._settings.empty_output_retries + 1
         for empty_attempt in range(empty_attempts):
-            attempt_payload = self._escalate_on_empty(payload, empty_attempt)
+            attempt_payload = self._escalate_on_empty(
+                payload,
+                empty_attempt,
+                recovery_messages=recovery_messages,
+            )
             response = self._post_with_retry(attempt_payload, deadline=deadline)
             if response.content or response.tool_calls:
-                return response
+                if empty_attempt == 0:
+                    return response
+                recovery_mode = (
+                    "stateful"
+                    if self._settings.empty_recovery_policy == "stateful"
+                    and recovery_messages
+                    else "legacy_truncated"
+                )
+                return replace(response, recovery_mode=recovery_mode)
             if empty_attempt + 1 < empty_attempts and deadline.can_start(0.25):
                 time.sleep(min(0.1, deadline.remaining(0.1)))
         raise UpstreamError("L2 returned an empty message", code="empty_l2_response")
 
-    def _escalate_on_empty(self, payload: dict[str, Any], attempt: int) -> dict[str, Any]:
+    def _escalate_on_empty(
+        self,
+        payload: dict[str, Any],
+        attempt: int,
+        *,
+        recovery_messages: Sequence[Mapping[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         """Shorten the conversation after an empty completion.
 
         Measured against the live model: on some long multi-turn conversations L2 returns
@@ -247,6 +267,31 @@ class L2Client:
         """
         if attempt == 0:
             return payload
+        recovery_policy = getattr(
+            getattr(self, "_settings", None),
+            "empty_recovery_policy",
+            "legacy",
+        )
+        if (
+            recovery_policy == "stateful"
+            and recovery_messages
+            and attempt >= 1
+        ):
+            escalated = dict(payload)
+            safe_messages = [dict(message) for message in recovery_messages]
+            if attempt > 1:
+                safe_messages.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "The previous compact attempt was empty. Produce the required "
+                            "answer or tool call now without dropping any safety fact, "
+                            "correction, or explicit requirement in the recovery packet."
+                        ),
+                    }
+                )
+            escalated["messages"] = safe_messages
+            return escalated
         keep = 6 if attempt == 1 else 2
         messages = [dict(message) for message in payload.get("messages", [])]
         lead = messages[:1] if messages and messages[0].get("role") == "system" else []

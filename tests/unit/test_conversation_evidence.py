@@ -5,7 +5,12 @@ import unittest
 
 from app.clients.mcp import McpTool
 from app.conversation import compile_conversation
-from app.evidence.models import EvidenceRegistry, fallback_selection, parse_final_selection
+from app.evidence.models import (
+    EvidenceRegistry,
+    EvidenceRequirement,
+    fallback_selection,
+    parse_final_selection,
+)
 from app.evidence.routing import SourceRouter
 
 
@@ -106,6 +111,130 @@ class EvidenceTests(unittest.TestCase):
             max_items=8,
         )
         self.assertEqual(outcome.status, "partial")
+
+    def test_unknown_requirement_id_downgrades_sufficient(self) -> None:
+        registry = EvidenceRegistry()
+        registry.register_payload(
+            {"cite_uid": "known", "content": "support"},
+            source_tool="tool",
+        )
+        outcome = parse_final_selection(
+            {
+                "status": "sufficient",
+                "items": [{"cite_uid": "known", "relevance_score": 0.9}],
+                "requirements": [
+                    {
+                        "id": "req-2",
+                        "status": "supported",
+                        "cite_uids": ["known"],
+                    }
+                ],
+            },
+            registry=registry,
+            query="question",
+            model_rounds=1,
+            mcp_calls=1,
+            max_items=8,
+        )
+        self.assertEqual(outcome.status, "partial")
+        self.assertIn("Unknown requirement ids were rejected", outcome.note)
+        self.assertEqual(outcome.requirement.status, "unresolved")
+
+    def test_requirement_citation_must_be_selected_and_known(self) -> None:
+        registry = EvidenceRegistry()
+        registry.register_payload(
+            {"cite_uid": "known", "content": "support"},
+            source_tool="tool",
+        )
+        registry.register_payload(
+            {"cite_uid": "other", "content": "support"},
+            source_tool="tool",
+        )
+        outcome = parse_final_selection(
+            {
+                "status": "sufficient",
+                "items": [{"cite_uid": "known", "relevance_score": 0.9}],
+                "requirements": [
+                    {
+                        "id": "req-1",
+                        "status": "supported",
+                        "cite_uids": ["other"],
+                    }
+                ],
+            },
+            registry=registry,
+            query="question",
+            model_rounds=1,
+            mcp_calls=1,
+            max_items=8,
+        )
+        self.assertEqual(outcome.status, "partial")
+        self.assertIn("Requirement cite_uids were rejected", outcome.note)
+        self.assertEqual(outcome.requirement.status, "unresolved")
+
+    def test_sufficient_requires_all_critical_requirements_closed(self) -> None:
+        registry = EvidenceRegistry()
+        registry.register_payload(
+            {"cite_uid": "known", "content": "support"},
+            source_tool="tool",
+        )
+        outcome = parse_final_selection(
+            {
+                "status": "sufficient",
+                "items": [{"cite_uid": "known", "relevance_score": 0.9}],
+                "requirements": [
+                    {
+                        "id": "req-1",
+                        "status": "supported",
+                        "cite_uids": ["known"],
+                    }
+                ],
+            },
+            registry=registry,
+            query="question",
+            model_rounds=1,
+            mcp_calls=1,
+            max_items=8,
+            requirements=(
+                EvidenceRequirement(id="req-1", claim_or_question="question"),
+                EvidenceRequirement(id="req-2", claim_or_question="contraindication check"),
+            ),
+        )
+        self.assertEqual(outcome.status, "partial")
+        self.assertEqual(
+            tuple(requirement.status for requirement in outcome.requirements),
+            ("supported", "unresolved"),
+        )
+        self.assertIn("Critical requirements remained unresolved: req-2", outcome.note)
+
+    def test_contradicted_critical_requirement_cannot_be_globally_sufficient(self) -> None:
+        registry = EvidenceRegistry()
+        registry.register_payload(
+            {"cite_uid": "known", "content": "authoritative contradiction"},
+            source_tool="tool",
+        )
+        outcome = parse_final_selection(
+            {
+                "status": "sufficient",
+                "items": [{"cite_uid": "known", "relevance_score": 0.9}],
+                "requirements": [
+                    {
+                        "id": "req-1",
+                        "status": "contradicted",
+                        "cite_uids": ["known"],
+                        "gap_reason": "Authoritative sources conflict with the claim.",
+                    }
+                ],
+            },
+            registry=registry,
+            query="question",
+            model_rounds=1,
+            mcp_calls=1,
+            max_items=8,
+        )
+
+        self.assertEqual(outcome.status, "partial")
+        self.assertEqual(outcome.requirement.status, "contradicted")
 
     def test_budget_fallback_is_partial_with_registered_evidence(self) -> None:
         registry = EvidenceRegistry()
