@@ -17,7 +17,7 @@ Generation 단계의 L2는 대화 전체를 바탕으로 직접 답하거나 `re
 
 ## 빠른 시작
 
-runtime dependency가 없는 Python 3.13+ 표준 라이브러리 구현이다. 실제 key는 채팅, source, Docker layer에 넣지 말고 로컬 환경변수로만 주입한다.
+runtime dependency가 없는 Python 3.13+ 표준 라이브러리 구현이다. 주최 측은 평가 시 환경변수를 주입하지 않으므로 제출 전용 `.env`를 image에 포함하며, 별도 runtime 환경변수가 있으면 그 값을 우선한다.
 
 ```bash
 # Offline verification
@@ -25,7 +25,7 @@ python3 -m unittest discover -s tests -v
 
 # Local service with organizer credentials
 cp .env.example .env
-# Edit only the local .env, then load it without committing it.
+# Edit the submission .env, then load it for direct host execution.
 set -a
 . ./.env
 set +a
@@ -51,11 +51,11 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 ```bash
 docker build -t lunit-hackathon-driver:local .
-docker run --rm -p 8000:8000 --env-file .env lunit-hackathon-driver:local
+docker run --rm -p 8000:8000 lunit-hackathon-driver:local
 BASE_URL=http://127.0.0.1:8000 scripts/smoke_test.sh
 ```
 
-`LUNIT_FM_API_KEY`가 없어도 container와 `/healthz`, `/v1/models`는 시작되며, chat endpoint는 의료 답변을 위조하지 않고 명시적인 `503 service_not_configured`를 반환한다.
+Docker build는 repository root의 `.env`를 `/app/submission.env`로 포함한다. 애플리케이션은 `LUNIT_FM_API_KEY` runtime 환경변수를 먼저 사용하고, 없을 때만 bundled key를 읽는다.
 
 ## 목차
 
@@ -554,14 +554,14 @@ Repository branch + 40-char HEAD SHA + model name
 | L2 base URL | `https://model.hackathon.lunit.io` |
 | L2 model | `Lunit/L2-preview` |
 | MCP URL | `https://mcp.hackathon.lunit.io/mcp` |
-| 인증 | `Authorization: Bearer <runtime secret>` |
+| 인증 | `Authorization: Bearer <team key>` |
 | 공통 secret env | `LUNIT_FM_API_KEY` |
 
 권장 runtime 환경변수:
 
 | 변수 | 필수 | 기본/예시 | 설명 |
 | --- | --- | --- | --- |
-| `LUNIT_FM_API_KEY` | 예 | 없음 | runtime에만 주입하는 team secret |
+| `LUNIT_FM_API_KEY` | 예 | bundled `.env` | runtime 값 우선, 없으면 제출 image의 key 사용 |
 | `LUNIT_FM_API_URL` | 예 | `https://model.hackathon.lunit.io` | L2 endpoint |
 | `LUNIT_FM_MODEL` | 예 | `Lunit/L2-preview` | 내부 L2 및 제출 model명 |
 | `LUNIT_MCP_URL` | 제안 | `https://mcp.hackathon.lunit.io/mcp` | MCP endpoint |
@@ -578,7 +578,7 @@ Repository branch + 40-char HEAD SHA + model name
 | `MAX_L2_RETRIES` | 제안 | `0` | timeout 증폭을 피하기 위한 기본 transient retry 상한 |
 | `EMPTY_OUTPUT_RETRIES` | 제안 | `0` | empty generation의 기본 재시도 상한 |
 
-실제 secret은 source, `.env` commit, Docker `ARG`/`ENV`, test fixture, log에 넣지 않는다.
+평가기는 환경변수를 주입하지 않는다는 주최 측 답변에 따라 제출 전용 `.env`만 image에 포함한다. key 값은 source code, test fixture, 문서, log에는 복제하지 않는다.
 
 ### 연결 환경 실측 계약
 
@@ -785,7 +785,7 @@ Repository branch + 40-char HEAD SHA + model name
 
 | ID | 미확정/위험 | 현재 대응 |
 | --- | --- | --- |
-| OPEN-001 | 평가 container에서 L2/MCP endpoint 접근과 secret 주입 | runtime adapter로 격리하고 확인 전 hard-code 금지 |
+| RESOLVED-001 | 평가기는 API key 환경변수를 주입하지 않음 | 제출 `.env`를 image에 포함하고 runtime 환경변수 우선권 유지 |
 | RESOLVED-002 | L2 표준 non-streaming tool-call request/response schema | live probe와 실제 adapter continuation으로 확정; `finish_reason`에 의존하지 않음 |
 | PARTIAL-003 | MCP parameter/result/pagination/`cite_uid` shape | 21개 input schema와 guideline citation shape 확인; 나머지 family/error coverage 계속 측정 |
 | OPEN-004 | evaluator timeout, concurrency, context/output limit | 모든 budget configurable, baseline latency 측정 |
@@ -817,7 +817,7 @@ Repository branch + 40-char HEAD SHA + model name
 
 ### Security / Isolation / Compliance
 
-- [ ] 실제 API key가 repository, Git history, Docker layer, log에 없다.
+- [ ] 제출 전용 API key는 bundled `.env`에만 있고 source/test/log에는 복제되지 않는다.
 - [ ] Patient Simulator와 public internet이 evaluation runtime dependency가 아니다.
 - [ ] 외부 data가 포함된다면 license와 offline packaging을 검증했다.
 - [ ] benchmark 문항·rubric·정답·case-specific template이 없다.
@@ -841,7 +841,7 @@ Repository branch + 40-char HEAD SHA + model name
 - all-tools/family routing, case-packet representation, high-risk review는 환경변수로 ablation 가능하다.
 - host와 Python 3.13 환경의 synthetic tests, Docker→fake L2 completion, network-none startup을 검증했다.
 - 실제 L2 기본/도구 continuation, 21개 MCP schema, guideline citation, L2→MCP→L2 전체 요청과 submission image 경계를 개발 환경에서 검증했다. grounded run은 host 약 90.9초·62.6k tokens, container 성공 재시도 54.7초·89.1k tokens로 비용과 변동성이 커 최적화가 필요하다.
-- Patient Simulator, dashboard, evaluator container의 secret/connectivity 계약은 아직 검증하지 않았다.
+- 주최 측 답변으로 evaluator가 API key를 주입하지 않는 것을 확인했고, bundled `.env`를 사용하는 image가 별도 환경변수 없이 live chat HTTP `200`을 반환하는 것을 검증했다.
 
 다음 작업은 **submission image의 live L2/MCP 경로를 검증하고 retrieval token/latency를 줄인 뒤, Patient Simulator와 synthetic ablation 및 dashboard aggregate validation으로 기본 feature 조합을 결정하는 것**이다.
 

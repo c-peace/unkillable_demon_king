@@ -20,7 +20,7 @@ These Lunit assets are accessible only within the Lunit network according to the
 - The same team API key can be used for the Model API, Patient Simulator, and MCP endpoint.
 - Send it as `Authorization: Bearer <key>`.
 - API keys have a `lunit_...` form.
-- Never commit or copy the real key into source, Docker layers, tests, logs, skill files, or documentation.
+- Never copy the key value into source code, tests, logs, skill files, or documentation.
 
 Use environment configuration:
 
@@ -30,7 +30,11 @@ LUNIT_FM_API_KEY="<runtime secret>"
 LUNIT_FM_MODEL="Lunit/L2-preview"
 ```
 
-Do not bake `LUNIT_FM_API_KEY` into the image. Pass it at runtime through the organizer-confirmed secret mechanism.
+## Evaluation credential delivery
+
+Organizer clarification supplied by the user on 2026-08-21 confirms that the evaluator runs the submitted image without a separate API-key injection mechanism. The private submission therefore bundles the dedicated team credential from repository-root `.env` as `/app/submission.env`. The application still gives an explicitly supplied runtime `LUNIT_FM_API_KEY` precedence over the bundled value.
+
+The key value must not be repeated in documentation, tests, source code, or logs. The organizer states that hackathon keys become invalid after the event.
 
 ## Lunit FM Chat Completions API
 
@@ -139,5 +143,5 @@ Append the exact received simulator question and the harness answer, then resend
 - Whether model and simulator expose `GET /v1/models`
 - Maximum message/context size and supported generation parameters
 - Streaming, parallel tool-call, and structured-output behavior
-- API-key injection mechanism in official evaluation
+- Rotation/revocation procedure if a submitted team key must be replaced before the event ends
 - Patient Simulator live behavior in the current development environment
