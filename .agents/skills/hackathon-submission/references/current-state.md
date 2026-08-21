@@ -8,7 +8,7 @@ Harden and evaluate the implemented Lunit L2 multi-turn conversation driver, the
 
 ## Current phase
 
-**Evaluator-compatible vertical slice implemented; repeated CoEval container termination is being addressed with fail-soft latency control.** The service implements the required HTTP/Docker boundary, full-history L2 generation, two-stage MCP retrieval, citation provenance, bounded failure handling, and feature-flagged advanced paths. Local `docker start --attach`, missing-secret handling, graceful shutdown, 64 concurrent synthetic requests under a 128 MiB limit, and the complete test suite did not terminate the process. This makes aggregate L2/MCP latency and retry amplification the leading cause of the evaluator watchdog termination. The global request deadline remains disabled, while optional retrieval now receives its own 30-second stage budget and L2 timeout requests are not retried.
+**The repeated CoEval failure was traced to missing evaluation-time API-key injection.** The organizer confirmed that the evaluator only runs the image and provides no separate credential mechanism. The submission now bundles repository-root `.env` as `/app/submission.env`; an explicit runtime `LUNIT_FM_API_KEY` still overrides it. A no-env Docker run returned HTTP `200` from both `/v1/models` and live `/v1/chat/completions`.
 
 ## Workspace status
 
@@ -18,7 +18,7 @@ Harden and evaluate the implemented Lunit L2 multi-turn conversation driver, the
 - `README.md` is the public architecture, requirements, runbook, and implementation-status document.
 - `app/` contains a Python 3.13-compatible, standard-library-only service; root `Dockerfile`, `.dockerignore`, `.env.example`, synthetic tests, smoke test, and Patient Simulator development script now exist.
 - The default runtime has no third-party Python dependencies and starts without downloading packages, models, or data.
-- `.env` is Git-ignored and currently supplies the development runtime settings; only presence was checked and no credential value was printed or copied into project documentation.
+- `.env` is intentionally tracked for this private submission because the evaluator does not inject credentials. Its value is bundled into the image but is never printed or copied into project documentation, tests, source code, or logs.
 - The user has moved `healthBench.pdf` from the repository root into `reference/`; Git currently reports the old path deleted and the `reference/` directory untracked. Preserve this user-owned workspace change until the user chooses to commit it.
 - Six PDFs are present under repository-root `reference/`: HealthBench plus the five newly supplied papers. The `.agents/.../references/` directory contains the derived project notes.
 - No real API key or patient data is stored in the workspace knowledge files.
@@ -120,18 +120,18 @@ Harden and evaluate the implemented Lunit L2 multi-turn conversation driver, the
 
 - The organizer's expanded advanced tool-calling documentation is still unavailable, although the standard non-streaming request/call/continuation path has been verified directly.
 - Complete response, pagination, error, and `cite_uid` coverage across all MCP tools remains unverified; only generic discovery and guideline-source calls were exercised live.
-- Evaluation-time secret injection and internal L2/MCP connectivity remain unconfirmed; development-environment access is not proof of evaluator-container access.
+- Evaluation-time secret injection is resolved: none is provided. The image must contain the submission `.env`; evaluator-network L2/MCP connectivity still requires the next dashboard trial.
 - Hackathon-specific scoring aggregation, latency limits, and dashboard retry allowance remain unconfirmed; the public paper's HealthBench scoring method is documented separately and must not be assumed to be the organizer's complete scoring contract.
 - Live Patient Simulator behavior, streaming, parallel tool calls, context limits, and rate/concurrency limits remain unverified.
 - The first full grounded live request took about 91 seconds and 62.6k tokens; retrieval prompt/context compaction and latency budgets require measured optimization.
 - The public-paper smoke run completed within the configured deadline but took 77.25 seconds and lost retrieval evidence before final generation. The user-facing response also disclosed the internal retrieval failure and showed possible under-triage; both are release-blocking quality issues for grounded/high-risk paths.
-- Repeated evaluator failures still expose only the `docker start --attach` wrapper exception, but local elimination tests make aggregate upstream latency/watchdog termination substantially more likely than Docker startup, missing-secret process exit, graceful-shutdown failure, or ordinary-concurrency OOM.
+- Earlier CoEval trials used an image without a key, so `/v1/models` succeeded while chat returned immediate `503 service_not_configured`; the wrapper later surfaced only `coeval_failed`. The credential path has now been corrected locally and awaits a new dashboard trial.
 - The previous global `REQUEST_TIMEOUT_SEC=90` path is no longer the default bottleneck. Current defaults favor `family` MCP routing, fewer retrieval rounds/tool calls, smaller evidence payloads, and retrieval-step deduplication while keeping per-call upstream timeouts in place.
 - The indexed guideline/HIRA retrieval bridge now auto-fetches page content when the relevant node result exposes a document id and page range; the remaining risk is whether live organizer responses use the same metadata keys as the development fake.
 
 ## Next actions
 
-1. Re-run one privacy-safe live grounded container smoke and compare latency/token usage against the earlier ~55-91 second grounded runs, because this turn only re-verified unit/integration and container-boundary contracts.
+1. Commit the dedicated submission `.env` with the bundled-key loader, publish a new submission-branch SHA, and run a dashboard trial.
 3. Add synthetic high-risk pediatric triage regressions based on general clinical capabilities, not the public HealthBench example, and evaluate whether conditional review improves escalation without blanket over-triage.
 4. Add an automated privacy-safe connected smoke path that distinguishes transient upstream failures from deterministic contract failures without logging content or credentials.
 5. Run Patient Simulator, systematic ablations, and dashboard aggregate validation before creating the final `lunit/hackathon-submission` branch and verifying the full SHA/model.

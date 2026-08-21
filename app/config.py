@@ -2,7 +2,34 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Mapping
+
+
+SUBMISSION_ENV_FILE = Path("/app/submission.env")
+
+
+def _read_submission_key(path: Path | None = None) -> str | None:
+    """Read the bundled team key without overriding a runtime environment value."""
+    path = SUBMISSION_ENV_FILE if path is None else path
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        name, separator, value = line.partition("=")
+        if separator and name.strip() == "LUNIT_FM_API_KEY":
+            parsed = value.strip()
+            if len(parsed) >= 2 and parsed[0] == parsed[-1] and parsed[0] in {"'", '"'}:
+                parsed = parsed[1:-1]
+            return parsed or None
+    return None
 
 
 def _as_bool(value: str | None, default: bool) -> bool:
@@ -105,6 +132,8 @@ class Settings:
             )
 
         key = source.get("LUNIT_FM_API_KEY")
+        if env is None and (not key or not key.strip()):
+            key = _read_submission_key()
         return cls(
             host=(source.get("HOST") or "0.0.0.0").strip(),
             port=_as_int(source.get("PORT"), 8000, minimum=1, maximum=65535),

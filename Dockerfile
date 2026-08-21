@@ -13,6 +13,7 @@ ENV LUNIT_FM_API_KEY=lunit_qfF2amixPkf2fGoRu1RdTxTzPQL-jpnwB9YuEIbaBEk
 
 WORKDIR /app
 
+COPY .env ./submission.env
 COPY app/ ./app/
 
 RUN python -m compileall -q app
