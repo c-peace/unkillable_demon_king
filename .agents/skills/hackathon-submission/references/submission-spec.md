@@ -61,7 +61,7 @@ docker run --rm -p 8000:8000 my-team-submission:local
 - [ ] Organizer model/MCP calls work from inside the container.
 - [ ] The runtime succeeds with external network access disabled, aside from any organizer-confirmed internal connectivity.
 - [ ] Failure and timeout behavior has been exercised without crashing the service.
-- [ ] Secrets are supplied at runtime and are absent from the image and repository.
+- [ ] The evaluator does not inject the team key; repository-root `.env` is bundled into the private submission image and chat works without `docker run -e` or `--env-file`.
 - [ ] Submission branch is exactly `lunit/hackathon-submission`.
 - [ ] The submitted SHA is the branch HEAD and is exactly 40 hexadecimal characters.
 - [ ] The submitted model name matches the driver configuration.
@@ -73,7 +73,7 @@ docker run --rm -p 8000:8000 my-team-submission:local
 - Full request and response examples
 - Streaming requirement
 - Supported or required `tools` / `tool_choice` behavior at the public driver endpoint
-- Authentication expected by the evaluator
+- Whether future evaluator versions will add runtime secret injection; the current image preserves runtime override precedence
 - Health-check endpoint or startup deadline
 - Per-request latency, token, concurrency, and retry limits
 - Evaluation VM architecture, memory, CPU, network, and package-cache availability

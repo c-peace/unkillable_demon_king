@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import os
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 from app.config import Settings
 from app.contracts import parse_chat_completion_request
@@ -14,6 +18,38 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.port, 8000)
         self.assertEqual(settings.model, "Lunit/L2-preview")
         self.assertIsNone(settings.lunit_fm_api_key)
+
+    def test_bundled_submission_key_is_used_when_runtime_key_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env_file = Path(directory) / "submission.env"
+            env_file.write_text(
+                "LUNIT_FM_API_KEY=bundled-test-key\n",
+                encoding="utf-8",
+            )
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                patch("app.config.SUBMISSION_ENV_FILE", env_file),
+            ):
+                settings = Settings.from_env()
+        self.assertEqual(settings.lunit_fm_api_key, "bundled-test-key")
+
+    def test_runtime_key_overrides_bundled_submission_key(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env_file = Path(directory) / "submission.env"
+            env_file.write_text(
+                "LUNIT_FM_API_KEY=bundled-test-key\n",
+                encoding="utf-8",
+            )
+            with (
+                patch.dict(
+                    os.environ,
+                    {"LUNIT_FM_API_KEY": "runtime-test-key"},
+                    clear=True,
+                ),
+                patch("app.config.SUBMISSION_ENV_FILE", env_file),
+            ):
+                settings = Settings.from_env()
+        self.assertEqual(settings.lunit_fm_api_key, "runtime-test-key")
 
     def test_defaults_favor_family_routing_and_tighter_retrieval_budgets(self) -> None:
         settings = Settings.from_env({})
