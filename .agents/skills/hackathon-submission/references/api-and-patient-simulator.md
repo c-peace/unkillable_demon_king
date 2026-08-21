@@ -65,6 +65,7 @@ Observed on 2026-08-21 using a runtime-injected team credential. No credential v
 - A second request containing the original assistant `tool_calls` message followed by a `role: "tool"` result produced a non-empty final assistant response. The current harness adapter is compatible with this continuation contract.
 - The tool-call response used `finish_reason: "stop"` even though `message.tool_calls` was present. Harness logic must branch on `message.tool_calls`, not require `finish_reason == "tool_calls"`.
 - Observed response message keys included `role`, `content`, `tool_calls`, `function_call`, `reasoning`, `refusal`, `annotations`, and `audio`. Only the fields required by the harness should be consumed.
+- The public gateway OpenAPI document exposed `max_tokens` for Chat Completions with a range of 1 to 32768 and required `parallel_tool_calls=false` when that field is supplied. The harness now sends a configurable bounded `max_tokens` value and disables parallel tool calls.
 
 These observations confirm the non-streaming standard tool-call path used by this project. They do not establish support for streaming tool-call deltas, parallel calls, every optional generation parameter, or future endpoint versions.
 

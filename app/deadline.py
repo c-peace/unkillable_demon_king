@@ -24,6 +24,15 @@ class Deadline:
             return cls.unbounded()
         return cls(expires_at=time.monotonic() + seconds)
 
+    def with_timeout_cap(self, seconds: float | None) -> "Deadline":
+        """Derive a stage deadline without extending an existing request deadline."""
+        if seconds is None:
+            return self
+        capped_expiry = time.monotonic() + seconds
+        if self.expires_at is None:
+            return Deadline(expires_at=capped_expiry)
+        return Deadline(expires_at=min(self.expires_at, capped_expiry))
+
     def remaining(self, cap: float | None = None) -> float:
         if self.expires_at is None:
             if cap is None:

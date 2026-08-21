@@ -1,11 +1,34 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
-from app.clients.l2 import _parse_response, parse_tool_arguments
+from app.clients.http import HttpTimeoutError
+from app.clients.l2 import L2Client, _parse_response, parse_tool_arguments
+from app.config import Settings
+from app.deadline import Deadline
+from app.errors import UpstreamError
 
 
 class L2ProtocolTests(unittest.TestCase):
+    def test_timeout_is_not_retried_even_when_transient_retries_are_enabled(self) -> None:
+        settings = Settings(
+            lunit_fm_api_key="test",
+            l2_retries=3,
+            empty_output_retries=0,
+        )
+        with patch(
+            "app.clients.l2.post_json",
+            side_effect=HttpTimeoutError("upstream timed out"),
+        ) as post:
+            with self.assertRaises(UpstreamError) as raised:
+                L2Client(settings).complete(
+                    [{"role": "user", "content": "hello"}],
+                    deadline=Deadline.unbounded(),
+                )
+        self.assertEqual(raised.exception.code, "l2_timeout")
+        self.assertEqual(post.call_count, 1)
+
     def test_openai_tool_call_shape_is_normalized(self) -> None:
         response = _parse_response(
             {
