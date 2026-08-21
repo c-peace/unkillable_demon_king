@@ -85,7 +85,7 @@ class FakeMcp:
 
 
 class DriverTests(unittest.TestCase):
-    def test_direct_answer_uses_full_history(self) -> None:
+    def test_direct_answer_uses_native_full_history(self) -> None:
         settings = Settings(lunit_fm_api_key="test")
         l2 = ScriptedL2([l2_content("최종 L2 답변")])
         driver = ConversationDriver(settings, l2=l2, retrieval=NeverRetrieval())  # type: ignore[arg-type]
@@ -102,8 +102,15 @@ class DriverTests(unittest.TestCase):
         )
         self.assertEqual(result.content, "최종 L2 답변")
         sent = l2.calls[0]["messages"]
-        self.assertEqual([message["role"] for message in sent[-3:]], ["user", "assistant", "user"])
+        self.assertEqual(
+            [message["role"] for message in sent[-3:]],
+            ["user", "assistant", "user"],
+        )
+        self.assertEqual(sent[-3]["content"], "첫 정보")
+        self.assertEqual(sent[-2]["content"], "이전 답")
+        self.assertEqual(sent[-1]["content"], "후속 질문")
         self.assertEqual(result.trace["lane"], "DIRECT")
+        self.assertEqual(result.trace["representation"], "native")
 
     def test_direct_answer_succeeds_without_global_request_deadline(self) -> None:
         settings = Settings(lunit_fm_api_key="test", request_timeout_sec=None)  # type: ignore[arg-type]
@@ -260,7 +267,6 @@ class DriverTests(unittest.TestCase):
     def test_high_risk_review_can_request_one_revision(self) -> None:
         settings = Settings(
             lunit_fm_api_key="test",
-            enable_high_risk_review=True,
             max_generation_retrievals=0,
         )
         l2 = ScriptedL2(
@@ -321,7 +327,7 @@ class DriverTests(unittest.TestCase):
         )
 
         class FailingRetrieval:
-            def run(self, query: str, *, deadline):
+            def run(self, query: str, *, deadline, request_id: str = ""):
                 raise UpstreamError("retrieval failed", code="mcp_request_failed")
 
         driver = ConversationDriver(
@@ -364,7 +370,7 @@ class DriverTests(unittest.TestCase):
         class BudgetCapturingRetrieval:
             remaining = None
 
-            def run(self, query: str, *, deadline):
+            def run(self, query: str, *, deadline, request_id: str = ""):
                 self.remaining = deadline.remaining(1.0)
                 raise UpstreamError("retrieval failed", code="retrieval_budget_test")
 

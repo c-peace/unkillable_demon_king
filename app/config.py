@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
-
 
 SUBMISSION_ENV_FILE = Path("/app/submission.env")
 
@@ -114,11 +113,25 @@ class Settings:
     mcp_protocol_version: str = "2025-03-26"
     mcp_tool_mode: str = "family"
     enable_mcp: bool = True
-    enable_high_risk_review: bool = False
+    enable_high_risk_review: bool = True
+    enable_structured_planning: bool = False
+    enable_requirement_ledger: bool = False
+    enable_response_contract: bool = False
+    enable_structured_review: bool = False
     conversation_representation: str = "native"
 
+    def __post_init__(self) -> None:
+        if self.enable_requirement_ledger and not self.enable_structured_planning:
+            raise ValueError("requirement ledger requires structured planning")
+        if self.enable_requirement_ledger and not self.enable_response_contract:
+            raise ValueError("requirement ledger requires the response contract")
+        if self.enable_response_contract and not self.enable_structured_planning:
+            raise ValueError("response contract requires structured planning")
+        if self.enable_structured_review and not self.enable_response_contract:
+            raise ValueError("structured review requires the response contract")
+
     @classmethod
-    def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":
+    def from_env(cls, env: Mapping[str, str] | None = None) -> Settings:
         source = os.environ if env is None else env
         tool_mode = (source.get("MCP_TOOL_MODE") or "family").strip().lower()
         if tool_mode not in {"all", "family"}:
@@ -223,7 +236,19 @@ class Settings:
             mcp_tool_mode=tool_mode,
             enable_mcp=_as_bool(source.get("ENABLE_MCP"), True),
             enable_high_risk_review=_as_bool(
-                source.get("ENABLE_HIGH_RISK_REVIEW"), False
+                source.get("ENABLE_HIGH_RISK_REVIEW"), True
+            ),
+            enable_structured_planning=_as_bool(
+                source.get("ENABLE_STRUCTURED_PLANNING"), False
+            ),
+            enable_requirement_ledger=_as_bool(
+                source.get("ENABLE_REQUIREMENT_LEDGER"), False
+            ),
+            enable_response_contract=_as_bool(
+                source.get("ENABLE_RESPONSE_CONTRACT"), False
+            ),
+            enable_structured_review=_as_bool(
+                source.get("ENABLE_STRUCTURED_REVIEW"), False
             ),
             conversation_representation=representation,
         )

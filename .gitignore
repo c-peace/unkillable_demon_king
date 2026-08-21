@@ -9,6 +9,7 @@
 .env.*
 !.env.example
 .venv/
+evaluation/runs/
 
 # Python caches and test artifacts
 __pycache__/

@@ -5,7 +5,6 @@ from collections.abc import Sequence
 
 from app.clients.mcp import McpTool
 
-
 CORE_FALLBACK_TOOL_NAMES: tuple[str, ...] = (
     "index_get_relevant_nodes",
     "index_get_page_content",
@@ -129,6 +128,29 @@ TOOL_PRIORITY: dict[str, int] = {
     "rag_sql_query": 63,
 }
 
+SOURCE_FAMILY_TOOLS: dict[str, tuple[str, ...]] = {
+    "guideline": ("index_get_relevant_nodes", "index_get_page_content"),
+    "drug_label": (
+        "adr_retrieve_drug_info",
+        "openapi_mfds_get_drug_indication",
+        "openapi_mfds_check_drug_permission",
+    ),
+    "approval": (
+        "openapi_mfds_check_drug_permission",
+        "openapi_mfds_get_drug_indication",
+    ),
+    "reimbursement": (
+        "hira_updates_search",
+        "openapi_hira_get_drug_price",
+        "index_get_relevant_nodes",
+        "index_get_page_content",
+    ),
+    "coding": ("kcd_search_codes", "kcd_get_name", "openapi_hira_disease_check_code"),
+    "law": ("openapi_law_search", "openapi_law_list_articles", "openapi_law_get_article"),
+    "research": ("rag_get_all_data_sources", "rag_get_data_source_detail", "rag_vector_query"),
+    "safety_signal": ("rag_get_all_data_sources", "rag_get_data_source_detail", "rag_sql_query"),
+}
+
 
 class SourceRouter:
     def __init__(self, mode: str) -> None:
@@ -140,6 +162,19 @@ class SourceRouter:
         selected_names = self._match_tool_names(query)
         selected = self._select_names(selected_names, tools)
         return selected or self._select_names(CORE_FALLBACK_TOOL_NAMES, tools) or tuple(tools)
+
+    def select_for_families(
+        self,
+        families: Sequence[str],
+        tools: Sequence[McpTool],
+        *,
+        fallback_query: str,
+    ) -> tuple[McpTool, ...]:
+        names: list[str] = []
+        for family in families:
+            names.extend(SOURCE_FAMILY_TOOLS.get(family, ()))
+        selected = self._select_names(tuple(dict.fromkeys(names)), tools)
+        return selected or self.select(fallback_query, tools)
 
     def _match_tool_names(self, query: str) -> tuple[str, ...]:
         matched: list[str] = []

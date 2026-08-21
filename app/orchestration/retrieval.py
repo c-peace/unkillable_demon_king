@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any
 
 from app.clients.l2 import L2Client, parse_tool_arguments
 from app.clients.mcp import McpClient, McpTool
@@ -13,13 +14,16 @@ from app.deadline import Deadline
 from app.errors import AppError
 from app.evidence.models import (
     EvidenceRegistry,
+    EvidenceRequirementLedger,
     RetrievalOutcome,
     fallback_selection,
+    ledger_fallback_selection,
     parse_final_selection,
+    parse_ledger_final_selection,
 )
 from app.evidence.routing import SourceRouter
+from app.observability import emit_event
 from app.prompts import RETRIEVAL_SYSTEM_PROMPT
-
 
 LOGGER = logging.getLogger("lunit_retrieval")
 
@@ -68,6 +72,50 @@ FINALIZE_RETRIEVAL_TOOL: dict[str, Any] = {
     },
 }
 
+FINALIZE_LEDGER_RETRIEVAL_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "finalize_retrieval",
+        "description": "Adjudicate every named evidence requirement and end retrieval.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["sufficient", "partial", "no_evidence"],
+                },
+                "requirements": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "status": {
+                                "type": "string",
+                                "enum": [
+                                    "missing",
+                                    "supported",
+                                    "contradicted",
+                                    "conflicted",
+                                    "inapplicable",
+                                ],
+                            },
+                            "cite_uids": {"type": "array", "items": {"type": "string"}},
+                            "applicability_note": {"type": "string"},
+                            "gap_reason": {"type": "string"},
+                        },
+                        "required": ["id", "status", "cite_uids", "applicability_note"],
+                        "additionalProperties": False,
+                    },
+                },
+                "note": {"type": "string", "default": ""},
+            },
+            "required": ["status", "requirements"],
+            "additionalProperties": False,
+        },
+    },
+}
+
 
 @dataclass(frozen=True, slots=True)
 class RetrievalRun:
@@ -103,6 +151,19 @@ def _tool_cache_key(name: str, arguments: Mapping[str, Any]) -> str:
         separators=(",", ":"),
         sort_keys=True,
     )
+
+
+def _ledger_tool_schema(
+    tool: McpTool, requirement_ids: tuple[str, ...]
+) -> dict[str, Any]:
+    schema = json.loads(json.dumps(tool.as_openai_tool()))
+    parameters = schema["function"].setdefault("parameters", {"type": "object"})
+    properties = parameters.setdefault("properties", {})
+    properties["requirement_id"] = {"type": "string", "enum": list(requirement_ids)}
+    required = parameters.setdefault("required", [])
+    if "requirement_id" not in required:
+        required.append("requirement_id")
+    return schema
 
 
 def _candidate_records(value: Any) -> tuple[Mapping[str, Any], ...]:
@@ -315,8 +376,11 @@ def _retrieval_user_message(
     max_model_rounds: int,
     max_mcp_tool_calls: int,
     selected_tools: tuple[McpTool, ...],
+    ledger: EvidenceRequirementLedger | None = None,
 ) -> str:
-    tool_list = ", ".join(tool.name for tool in selected_tools) if selected_tools else "none"
+    tool_list = (
+        ", ".join(tool.name for tool in selected_tools) if selected_tools else "none"
+    )
     selected_names = {tool.name for tool in selected_tools}
     index_path = ""
     if {"index_get_relevant_nodes", "index_get_page_content"}.issubset(selected_names):
@@ -326,10 +390,18 @@ def _retrieval_user_message(
             "page content for the best returned document when a page range is available, so "
             "do not repeat document discovery with reformulated queries.\n"
         )
+    requirement_text = ""
+    if ledger is not None:
+        requirement_text = (
+            "Named evidence requirements (every MCP call must include one missing requirement_id):\n"
+            + json.dumps(ledger.to_prompt_records(), ensure_ascii=False, separators=(",", ":"))
+            + "\n"
+        )
     return (
         "Retrieve evidence for this self-contained question:\n"
         f"{query}\n\n"
-        "Use the shortest authoritative path for the single critical evidence requirement. "
+        f"{requirement_text}"
+        "Use the shortest authoritative path for each named critical evidence requirement. "
         "Prefer exact official tools or exact page reads over broad exploratory search.\n"
         f"{index_path}"
         f"Available MCP tools: {tool_list}\n"
@@ -352,18 +424,56 @@ class RetrievalEngine:
         self._mcp = mcp
         self._router = SourceRouter(settings.mcp_tool_mode)
 
-    def run(self, query: str, *, deadline: Deadline) -> RetrievalRun:
+    def run(
+        self,
+        query: str | EvidenceRequirementLedger,
+        *,
+        deadline: Deadline,
+        request_id: str = "",
+    ) -> RetrievalRun:
+        ledger = query if isinstance(query, EvidenceRequirementLedger) else None
+        query_text = (
+            "; ".join(requirement.claim_or_question for requirement in ledger.requirements)
+            if ledger is not None
+            else query
+        )
         registry = EvidenceRegistry()
         usage: dict[str, int] = {}
+        emit_event(
+            LOGGER,
+            "retrieval_engine_started",
+            request_id=request_id,
+            query_chars=len(query_text),
+            requirement_count=len(ledger.requirements) if ledger is not None else 0,
+            tool_mode=self._settings.mcp_tool_mode,
+            max_model_rounds=self._settings.max_retrieval_model_rounds,
+            max_mcp_calls=self._settings.max_mcp_tool_calls,
+        )
         if not self._settings.enable_mcp:
+            emit_event(
+                LOGGER,
+                "retrieval_engine_degraded",
+                request_id=request_id,
+                reason="mcp_disabled",
+            )
             return RetrievalRun(
-                outcome=fallback_selection(
-                    registry=registry,
-                    query=query,
-                    note="MCP retrieval is disabled.",
-                    model_rounds=0,
-                    mcp_calls=0,
-                    max_items=self._settings.max_evidence_items,
+                outcome=(
+                    ledger_fallback_selection(
+                        ledger=ledger,
+                        registry=registry,
+                        note="MCP retrieval is disabled.",
+                        model_rounds=0,
+                        mcp_calls=0,
+                    )
+                    if ledger is not None
+                    else fallback_selection(
+                        registry=registry,
+                        query=query_text,
+                        note="MCP retrieval is disabled.",
+                        model_rounds=0,
+                        mcp_calls=0,
+                        max_items=self._settings.max_evidence_items,
+                    )
                 ),
                 usage=usage,
                 l2_calls=0,
@@ -371,43 +481,86 @@ class RetrievalEngine:
 
         try:
             discovered = self._mcp.list_tools(deadline=deadline)
-        except AppError:
+        except AppError as exc:
+            emit_event(
+                LOGGER,
+                "retrieval_engine_degraded",
+                level=logging.WARNING,
+                request_id=request_id,
+                reason="tool_discovery_failed",
+                error=exc.code,
+            )
             return RetrievalRun(
-                outcome=fallback_selection(
-                    registry=registry,
-                    query=query,
-                    note="The evidence service was unavailable.",
-                    model_rounds=0,
-                    mcp_calls=0,
-                    max_items=self._settings.max_evidence_items,
+                outcome=(
+                    ledger_fallback_selection(
+                        ledger=ledger,
+                        registry=registry,
+                        note="The evidence service was unavailable.",
+                        model_rounds=0,
+                        mcp_calls=0,
+                    )
+                    if ledger is not None
+                    else fallback_selection(
+                        registry=registry,
+                        query=query_text,
+                        note="The evidence service was unavailable.",
+                        model_rounds=0,
+                        mcp_calls=0,
+                        max_items=self._settings.max_evidence_items,
+                    )
                 ),
                 usage=usage,
                 l2_calls=0,
             )
-        selected_tools = tuple(
-            tool
-            for tool in self._router.select(query, discovered)
-            if VALID_TOOL_NAME.fullmatch(tool.name)
+        routed = (
+            self._router.select_for_families(
+                tuple(requirement.source_family for requirement in ledger.requirements),
+                discovered,
+                fallback_query=query_text,
+            )
+            if ledger is not None
+            else self._router.select(query_text, discovered)
         )
-        LOGGER.info(
-            "retrieval_tools_selected count=%s tools=%s",
-            len(selected_tools),
-            ",".join(tool.name for tool in selected_tools),
+        selected_tools = tuple(
+            tool for tool in routed if VALID_TOOL_NAME.fullmatch(tool.name)
+        )
+        emit_event(
+            LOGGER,
+            "retrieval_tools_selected",
+            request_id=request_id,
+            count=len(selected_tools),
+            tools=[tool.name for tool in selected_tools],
         )
         tool_by_name = {tool.name: tool for tool in selected_tools}
         page_content_tool = tool_by_name.get("index_get_page_content")
-        retrieval_tools = [tool.as_openai_tool() for tool in selected_tools]
-        retrieval_tools.append(FINALIZE_RETRIEVAL_TOOL)
+        requirement_ids = (
+            tuple(requirement.id for requirement in ledger.requirements)
+            if ledger is not None
+            else ()
+        )
+        retrieval_tools = [
+            _ledger_tool_schema(tool, requirement_ids)
+            if ledger is not None
+            else tool.as_openai_tool()
+            for tool in selected_tools
+        ]
+        finalizer_tool = (
+            FINALIZE_LEDGER_RETRIEVAL_TOOL
+            if ledger is not None
+            else FINALIZE_RETRIEVAL_TOOL
+        )
+        retrieval_tools.append(finalizer_tool)
 
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": RETRIEVAL_SYSTEM_PROMPT},
             {
                 "role": "user",
                 "content": _retrieval_user_message(
-                    query,
+                    query_text,
                     max_model_rounds=self._settings.max_retrieval_model_rounds,
                     max_mcp_tool_calls=self._settings.max_mcp_tool_calls,
                     selected_tools=selected_tools,
+                    ledger=ledger,
                 ),
             },
         ]
@@ -420,6 +573,14 @@ class RetrievalEngine:
 
         while model_rounds < self._settings.max_retrieval_model_rounds:
             if not deadline.can_start(0.25):
+                emit_event(
+                    LOGGER,
+                    "retrieval_budget_stopped",
+                    request_id=request_id,
+                    reason="stage_deadline",
+                    model_rounds=model_rounds,
+                    mcp_calls=mcp_calls,
+                )
                 break
             # Keep searching while budget allows, even once citable evidence exists: the
             # first hit is often only partially on-topic, and retrieval_tools already
@@ -433,22 +594,39 @@ class RetrievalEngine:
             round_tools = (
                 retrieval_tools
                 if search_budget_left or not len(registry)
-                else [FINALIZE_RETRIEVAL_TOOL]
+                else [finalizer_tool]
             )
             allowed_tool_names = {
                 tool["function"]["name"]
                 for tool in round_tools
                 if isinstance(tool.get("function"), Mapping)
             }
+            emit_event(
+                LOGGER,
+                "retrieval_round_started",
+                request_id=request_id,
+                round=model_rounds + 1,
+                available_tools=len(round_tools),
+                remaining_mcp_calls=self._settings.max_mcp_tool_calls - mcp_calls,
+            )
             response = self._l2.complete(messages, deadline=deadline, tools=round_tools)
             model_rounds += 1
             _sum_usage(usage, response.usage)
             messages.append(response.assistant_message)
 
             if not response.tool_calls:
+                emit_event(
+                    LOGGER,
+                    "retrieval_round_no_tool_call",
+                    request_id=request_id,
+                    round=model_rounds,
+                    finalizer_already_nudged=finalizer_nudged,
+                )
                 if finalizer_nudged:
                     break
-                remaining_rounds = self._settings.max_retrieval_model_rounds - model_rounds
+                remaining_rounds = (
+                    self._settings.max_retrieval_model_rounds - model_rounds
+                )
                 remaining_calls = self._settings.max_mcp_tool_calls - mcp_calls
                 messages.append(
                     {
@@ -466,7 +644,22 @@ class RetrievalEngine:
 
             should_stop_after_turn = False
             for call in response.tool_calls:
+                emit_event(
+                    LOGGER,
+                    "retrieval_tool_received",
+                    request_id=request_id,
+                    round=model_rounds,
+                    tool=call.name,
+                )
                 if call.name not in allowed_tool_names:
+                    emit_event(
+                        LOGGER,
+                        "retrieval_tool_rejected",
+                        request_id=request_id,
+                        round=model_rounds,
+                        tool=call.name,
+                        reason="not_available_in_phase",
+                    )
                     messages.append(
                         {
                             "role": "tool",
@@ -486,15 +679,34 @@ class RetrievalEngine:
                 if call.name == "finalize_retrieval":
                     try:
                         arguments = parse_tool_arguments(call.arguments)
-                        outcome = parse_final_selection(
-                            arguments,
-                            registry=registry,
-                            query=query,
-                            model_rounds=model_rounds,
-                            mcp_calls=mcp_calls,
-                            max_items=self._settings.max_evidence_items,
+                        outcome = (
+                            parse_ledger_final_selection(
+                                arguments,
+                                ledger=ledger,
+                                registry=registry,
+                                model_rounds=model_rounds,
+                                mcp_calls=mcp_calls,
+                                max_items=self._settings.max_evidence_items,
+                            )
+                            if ledger is not None
+                            else parse_final_selection(
+                                arguments,
+                                registry=registry,
+                                query=query_text,
+                                model_rounds=model_rounds,
+                                mcp_calls=mcp_calls,
+                                max_items=self._settings.max_evidence_items,
+                            )
                         )
-                    except (ValueError, json.JSONDecodeError) as exc:
+                    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                        emit_event(
+                            LOGGER,
+                            "retrieval_tool_rejected",
+                            request_id=request_id,
+                            round=model_rounds,
+                            tool=call.name,
+                            reason="invalid_finalizer",
+                        )
                         messages.append(
                             {
                                 "role": "tool",
@@ -509,6 +721,15 @@ class RetrievalEngine:
                             }
                         )
                         continue
+                    emit_event(
+                        LOGGER,
+                        "retrieval_finalized",
+                        request_id=request_id,
+                        round=model_rounds,
+                        status=outcome.status,
+                        mcp_calls=mcp_calls,
+                        evidence_count=len(outcome.evidence),
+                    )
                     return RetrievalRun(
                         outcome=outcome,
                         usage=usage,
@@ -517,24 +738,45 @@ class RetrievalEngine:
 
                 tool = tool_by_name.get(call.name)
                 if tool is None:
+                    emit_event(
+                        LOGGER,
+                        "retrieval_tool_rejected",
+                        request_id=request_id,
+                        round=model_rounds,
+                        tool=call.name,
+                        reason="unknown_tool",
+                    )
                     messages.append(
                         {
                             "role": "tool",
                             "tool_call_id": call.id,
                             "content": json.dumps(
-                                {"error": "unknown_or_unavailable_tool", "tool": call.name}
+                                {
+                                    "error": "unknown_or_unavailable_tool",
+                                    "tool": call.name,
+                                }
                             ),
                         }
                     )
                     continue
                 if mcp_calls >= self._settings.max_mcp_tool_calls:
+                    emit_event(
+                        LOGGER,
+                        "retrieval_tool_rejected",
+                        request_id=request_id,
+                        round=model_rounds,
+                        tool=call.name,
+                        reason="mcp_budget_exhausted",
+                    )
                     mcp_budget_exhausted = True
                     should_stop_after_turn = True
                     messages.append(
                         {
                             "role": "tool",
                             "tool_call_id": call.id,
-                            "content": json.dumps({"error": "mcp_tool_call_budget_exhausted"}),
+                            "content": json.dumps(
+                                {"error": "mcp_tool_call_budget_exhausted"}
+                            ),
                         }
                     )
                     continue
@@ -543,6 +785,14 @@ class RetrievalEngine:
                 # relevant_nodes/page_content cycles that burned the whole budget.
                 used_before = tool_use_counts.get(tool.name, 0)
                 if used_before >= MAX_CALLS_PER_TOOL:
+                    emit_event(
+                        LOGGER,
+                        "retrieval_tool_rejected",
+                        request_id=request_id,
+                        round=model_rounds,
+                        tool=call.name,
+                        reason="repeat_limit",
+                    )
                     messages.append(
                         {
                             "role": "tool",
@@ -564,6 +814,14 @@ class RetrievalEngine:
                 try:
                     arguments = parse_tool_arguments(call.arguments)
                 except (ValueError, json.JSONDecodeError):
+                    emit_event(
+                        LOGGER,
+                        "retrieval_tool_rejected",
+                        request_id=request_id,
+                        round=model_rounds,
+                        tool=call.name,
+                        reason="invalid_arguments",
+                    )
                     messages.append(
                         {
                             "role": "tool",
@@ -572,10 +830,46 @@ class RetrievalEngine:
                         }
                     )
                     continue
-                cache_key = _tool_cache_key(tool.name, arguments)
+                requirement_id = ""
+                if ledger is not None:
+                    raw_requirement_id = arguments.pop("requirement_id", None)
+                    missing_ids = {item.id for item in ledger.unresolved()}
+                    if not isinstance(raw_requirement_id, str) or raw_requirement_id not in missing_ids:
+                        emit_event(
+                            LOGGER,
+                            "retrieval_tool_rejected",
+                            request_id=request_id,
+                            round=model_rounds,
+                            tool=call.name,
+                            reason="invalid_requirement_id",
+                        )
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": call.id,
+                                "content": json.dumps(
+                                    {
+                                        "error": "invalid_or_resolved_requirement_id",
+                                        "missing_requirement_ids": sorted(missing_ids),
+                                    }
+                                ),
+                            }
+                        )
+                        continue
+                    requirement_id = raw_requirement_id
+                cache_arguments = dict(arguments)
+                if requirement_id:
+                    cache_arguments["requirement_id"] = requirement_id
+                cache_key = _tool_cache_key(tool.name, cache_arguments)
                 cached = tool_cache.get(cache_key)
                 if cached is not None:
-                    LOGGER.info("retrieval_tool_cache_hit tool=%s", tool.name)
+                    emit_event(
+                        LOGGER,
+                        "retrieval_tool_cache_hit",
+                        request_id=request_id,
+                        round=model_rounds,
+                        tool=tool.name,
+                    )
                     messages.append(
                         {
                             "role": "tool",
@@ -585,6 +879,15 @@ class RetrievalEngine:
                     )
                     continue
                 try:
+                    emit_event(
+                        LOGGER,
+                        "retrieval_tool_started",
+                        request_id=request_id,
+                        round=model_rounds,
+                        tool=tool.name,
+                        call=mcp_calls + 1,
+                        requirement_id=requirement_id or None,
+                    )
                     result = self._mcp.call_tool(
                         tool.name,
                         arguments,
@@ -593,16 +896,23 @@ class RetrievalEngine:
                     mcp_calls += 1
                     tool_use_counts[tool.name] = used_before + 1
                     cite_uids = registry.register_payload(result, source_tool=tool.name)
-                    LOGGER.info(
-                        "retrieval_tool_completed tool=%s call=%s citations=%s",
-                        tool.name,
-                        mcp_calls,
-                        len(cite_uids),
+                    emit_event(
+                        LOGGER,
+                        "retrieval_tool_completed",
+                        request_id=request_id,
+                        round=model_rounds,
+                        tool=tool.name,
+                        call=mcp_calls,
+                        citations=len(cite_uids),
+                        automatic=False,
                     )
                     if tool.name == "index_get_page_content" and cite_uids:
                         tool_content = {
+                            "requirement_id": requirement_id or None,
                             "registered_cite_uids": list(cite_uids),
-                            "evidence": _registered_evidence_payload(registry, cite_uids),
+                            "evidence": _registered_evidence_payload(
+                                registry, cite_uids
+                            ),
                             "instruction": (
                                 "Check this evidence against the query. If it covers every "
                                 "evidence requirement, call finalize_retrieval with the relevant "
@@ -612,11 +922,13 @@ class RetrievalEngine:
                         }
                     elif tool.name == "index_get_relevant_nodes":
                         tool_content = {
+                            "requirement_id": requirement_id or None,
                             "registered_cite_uids": list(cite_uids),
                             "candidates": _compact_candidates(result),
                         }
                     else:
                         tool_content = {
+                            "requirement_id": requirement_id or None,
                             "registered_cite_uids": list(cite_uids),
                             "result": result,
                         }
@@ -635,9 +947,11 @@ class RetrievalEngine:
                             page_content_tool,
                         )
                         if page_arguments is not None:
+                            page_cache_arguments = dict(page_arguments)
+                            if requirement_id:
+                                page_cache_arguments["requirement_id"] = requirement_id
                             page_cache_key = _tool_cache_key(
-                                page_content_tool.name,
-                                page_arguments,
+                                page_content_tool.name, page_cache_arguments
                             )
                             try:
                                 page_result = self._mcp.call_tool(
@@ -653,13 +967,18 @@ class RetrievalEngine:
                                     page_result,
                                     source_tool=page_content_tool.name,
                                 )
-                                LOGGER.info(
-                                    "retrieval_tool_completed tool=%s call=%s citations=%s auto=true",
-                                    page_content_tool.name,
-                                    mcp_calls,
-                                    len(page_cite_uids),
+                                emit_event(
+                                    LOGGER,
+                                    "retrieval_tool_completed",
+                                    request_id=request_id,
+                                    round=model_rounds,
+                                    tool=page_content_tool.name,
+                                    call=mcp_calls,
+                                    citations=len(page_cite_uids),
+                                    automatic=True,
                                 )
                                 page_payload = {
+                                    "requirement_id": requirement_id or None,
                                     "registered_cite_uids": list(page_cite_uids),
                                     "evidence": _registered_evidence_payload(
                                         registry,
@@ -689,16 +1008,29 @@ class RetrievalEngine:
                                 )
                                 if page_cite_uids and not bridge_budget_left:
                                     return RetrievalRun(
-                                        outcome=fallback_selection(
-                                            registry=registry,
-                                            query=query,
-                                            note=(
-                                                "Citable indexed page evidence was collected by "
-                                                "the deterministic retrieval bridge."
-                                            ),
-                                            model_rounds=model_rounds,
-                                            mcp_calls=mcp_calls,
-                                            max_items=self._settings.max_evidence_items,
+                                        outcome=(
+                                            ledger_fallback_selection(
+                                                ledger=ledger,
+                                                registry=registry,
+                                                note=(
+                                                    "Citable candidates were collected but not "
+                                                    "adjudicated against their named requirements."
+                                                ),
+                                                model_rounds=model_rounds,
+                                                mcp_calls=mcp_calls,
+                                            )
+                                            if ledger is not None
+                                            else fallback_selection(
+                                                registry=registry,
+                                                query=query_text,
+                                                note=(
+                                                    "Citable indexed page evidence was collected by "
+                                                    "the deterministic retrieval bridge."
+                                                ),
+                                                model_rounds=model_rounds,
+                                                mcp_calls=mcp_calls,
+                                                max_items=self._settings.max_evidence_items,
+                                            )
                                         ),
                                         usage=usage,
                                         l2_calls=model_rounds,
@@ -708,11 +1040,16 @@ class RetrievalEngine:
                                 tool_use_counts[page_content_tool.name] = (
                                     tool_use_counts.get(page_content_tool.name, 0) + 1
                                 )
-                                LOGGER.warning(
-                                    "retrieval_tool_failed tool=%s call=%s code=%s auto=true",
-                                    page_content_tool.name,
-                                    mcp_calls,
-                                    exc.code,
+                                emit_event(
+                                    LOGGER,
+                                    "retrieval_tool_failed",
+                                    level=logging.WARNING,
+                                    request_id=request_id,
+                                    round=model_rounds,
+                                    tool=page_content_tool.name,
+                                    call=mcp_calls,
+                                    error=exc.code,
+                                    automatic=True,
                                 )
                                 tool_content["auto_page_read"] = False
                                 tool_content["instruction"] = (
@@ -722,13 +1059,21 @@ class RetrievalEngine:
                 except AppError as exc:
                     mcp_calls += 1
                     tool_use_counts[tool.name] = used_before + 1
-                    LOGGER.warning(
-                        "retrieval_tool_failed tool=%s call=%s code=%s",
-                        tool.name,
-                        mcp_calls,
-                        exc.code,
+                    emit_event(
+                        LOGGER,
+                        "retrieval_tool_failed",
+                        level=logging.WARNING,
+                        request_id=request_id,
+                        round=model_rounds,
+                        tool=tool.name,
+                        call=mcp_calls,
+                        error=exc.code,
+                        automatic=False,
                     )
-                    tool_content = {"error": exc.code, "detail": "MCP tool call failed."}
+                    tool_content = {
+                        "error": exc.code,
+                        "detail": "MCP tool call failed.",
+                    }
                 rendered = _tool_result_content(
                     tool_content,
                     self._settings.max_tool_result_chars,
@@ -754,15 +1099,42 @@ class RetrievalEngine:
             note = "Retrieval ended because the retrieval model-round budget was exhausted."
         else:
             note = "Retrieval ended at the configured round, tool-call, or time budget."
-        return RetrievalRun(
-            outcome=fallback_selection(
+        outcome = (
+            ledger_fallback_selection(
+                ledger=ledger,
                 registry=registry,
-                query=query,
+                note=note,
+                model_rounds=model_rounds,
+                mcp_calls=mcp_calls,
+            )
+            if ledger is not None
+            else fallback_selection(
+                registry=registry,
+                query=query_text,
                 note=note,
                 model_rounds=model_rounds,
                 mcp_calls=mcp_calls,
                 max_items=self._settings.max_evidence_items,
+            )
+        )
+        emit_event(
+            LOGGER,
+            "retrieval_budget_stopped",
+            request_id=request_id,
+            reason=(
+                "mcp_budget"
+                if mcp_budget_exhausted
+                else "model_round_budget"
+                if model_rounds >= self._settings.max_retrieval_model_rounds
+                else "configured_budget"
             ),
+            model_rounds=model_rounds,
+            mcp_calls=mcp_calls,
+            status=outcome.status,
+            evidence_count=len(outcome.evidence),
+        )
+        return RetrievalRun(
+            outcome=outcome,
             usage=usage,
             l2_calls=model_rounds,
         )

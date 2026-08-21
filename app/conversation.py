@@ -3,9 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Iterable
-
+from typing import Any
 
 HIGH_RISK_PATTERN = re.compile(
     r"(용량|복용량|과다복용|상호작용|금기|임신|수유|소아|영아|신생아|"
@@ -13,6 +13,20 @@ HIGH_RISK_PATTERN = re.compile(
     r"dose|dosage|overdose|interaction|contraindication|pregnan|breastfeed|"
     r"pediatric|infant|newborn|chest pain|shortness of breath|suicid|self-harm|"
     r"emergency|anaphylaxis|severe bleeding)",
+    re.IGNORECASE,
+)
+IMPLICIT_REFERENCE_PATTERN = re.compile(
+    r"(그\s*(약|증상|용량|검사|수치|치료)|앞서|아까|이전|그럼|그것|"
+    r"that\s+(drug|dose|symptom|result|treatment)|previous|earlier|what about it)",
+    re.IGNORECASE,
+)
+SOURCE_SENSITIVE_PATTERN = re.compile(
+    r"(가이드라인|진료지침|허가|적응증|급여|보험|법령|법률|질병코드|상병코드|"
+    r"guideline|recommendation|approval|indication|reimbursement|coverage|statute|kcd)",
+    re.IGNORECASE,
+)
+STRICT_FORMAT_PATTERN = re.compile(
+    r"(표로|목록으로|JSON|CSV|한\s*문장|글자|단어|형식|table|bullet|format)",
     re.IGNORECASE,
 )
 
@@ -24,6 +38,11 @@ class CompiledConversation:
     history_hash: str
     case_packet: str
     is_high_risk: bool
+    full_history_high_risk: bool
+    has_implicit_reference: bool
+    is_source_sensitive: bool
+    has_strict_format: bool
+    user_turn_ids: tuple[int, ...]
 
     def generation_messages(self, representation: str) -> list[dict[str, Any]]:
         if representation == "native":
@@ -54,14 +73,26 @@ def compile_conversation(messages: Iterable[dict[str, Any]]) -> CompiledConversa
     canonical = json.dumps(copied, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     history_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
     turns = []
+    user_turn_ids: list[int] = []
+    user_texts: list[str] = []
     for index, message in enumerate(copied, start=1):
         role = str(message.get("role", "unknown")).upper()
-        turns.append(f"[TURN {index} | {role}]\n{_message_text(message)}")
+        text = _message_text(message)
+        turns.append(f"[TURN {index} | {role}]\n{text}")
+        if message.get("role") == "user":
+            user_turn_ids.append(index)
+            user_texts.append(text)
     packet = "\n\n".join(turns)
+    full_user_history = "\n".join(user_texts)
     return CompiledConversation(
         messages=copied,
         latest_user_text=latest_user,
         history_hash=history_hash,
         case_packet=packet,
         is_high_risk=bool(HIGH_RISK_PATTERN.search(latest_user)),
+        full_history_high_risk=bool(HIGH_RISK_PATTERN.search(full_user_history)),
+        has_implicit_reference=bool(IMPLICIT_REFERENCE_PATTERN.search(latest_user)),
+        is_source_sensitive=bool(SOURCE_SENSITIVE_PATTERN.search(latest_user)),
+        has_strict_format=bool(STRICT_FORMAT_PATTERN.search(latest_user)),
+        user_turn_ids=tuple(user_turn_ids),
     )

@@ -5,7 +5,11 @@ import unittest
 
 from app.clients.mcp import McpTool
 from app.conversation import compile_conversation
-from app.evidence.models import EvidenceRegistry, fallback_selection, parse_final_selection
+from app.evidence.models import (
+    EvidenceRegistry,
+    fallback_selection,
+    parse_final_selection,
+)
 from app.evidence.routing import SourceRouter
 
 
@@ -22,6 +26,24 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(compiled.latest_user_text, "임신 중 용량을 바꿔야 하나요?")
         self.assertTrue(compiled.is_high_risk)
         self.assertEqual(compiled.history_hash, compile_conversation(compiled.messages).history_hash)
+
+    def test_case_packet_generation_keeps_every_role_and_turn(self) -> None:
+        compiled = compile_conversation(
+            [
+                {"role": "user", "content": "처음에는 10mg이라고 말했습니다."},
+                {"role": "assistant", "content": "10mg으로 이해했습니다."},
+                {"role": "user", "content": "정정할게요. 실제로는 5mg입니다."},
+            ]
+        )
+
+        messages = compiled.generation_messages("case_packet")
+
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0]["role"], "user")
+        self.assertIn("[TURN 1 | USER]", messages[0]["content"])
+        self.assertIn("[TURN 2 | ASSISTANT]", messages[0]["content"])
+        self.assertIn("[TURN 3 | USER]", messages[0]["content"])
+        self.assertIn("실제로는 5mg", messages[0]["content"])
 
 
 class EvidenceTests(unittest.TestCase):

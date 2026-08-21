@@ -18,6 +18,8 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.port, 8000)
         self.assertEqual(settings.model, "Lunit/L2-preview")
         self.assertIsNone(settings.lunit_fm_api_key)
+        self.assertEqual(settings.conversation_representation, "native")
+        self.assertTrue(settings.enable_high_risk_review)
 
     def test_bundled_submission_key_is_used_when_runtime_key_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

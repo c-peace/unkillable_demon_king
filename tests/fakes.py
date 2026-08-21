@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from collections import deque
-from typing import Any, Mapping, Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 from app.clients.l2 import L2Response
 
@@ -35,7 +36,9 @@ def l2_content(content: str, usage: Mapping[str, int] | None = None) -> L2Respon
 def l2_tool_call(call_id: str, name: str, arguments: Any) -> L2Response:
     from app.clients.l2 import ToolCall
 
-    argument_text = arguments if isinstance(arguments, str) else __import__("json").dumps(arguments)
+    argument_text = (
+        arguments if isinstance(arguments, str) else __import__("json").dumps(arguments)
+    )
     raw_call = {
         "id": call_id,
         "type": "function",
@@ -44,11 +47,15 @@ def l2_tool_call(call_id: str, name: str, arguments: Any) -> L2Response:
     return L2Response(
         content="",
         tool_calls=(ToolCall(call_id, name, arguments),),
-        assistant_message={"role": "assistant", "content": None, "tool_calls": [raw_call]},
+        assistant_message={
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [raw_call],
+        },
         usage={},
     )
 
 
 class NeverRetrieval:
-    def run(self, query: str, *, deadline):
+    def run(self, query: str, *, deadline, request_id: str = ""):
         raise AssertionError(f"retrieval should not run: {query}")
