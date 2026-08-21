@@ -56,7 +56,9 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.mcp_tool_mode, "family")
         self.assertEqual(settings.l2_timeout_sec, 90.0)
         self.assertEqual(settings.l2_retries, 1)
-        self.assertEqual(settings.empty_output_retries, 1)
+        # Three attempts, because the first re-send of a greedy request is deterministic
+        # and reproduces the empty completion exactly. See test_empty_escalation.
+        self.assertEqual(settings.empty_output_retries, 2)
         self.assertEqual(settings.l2_max_tokens, 4_096)
         self.assertEqual(settings.request_timeout_sec, 240.0)
         self.assertEqual(settings.retrieval_timeout_sec, 90.0)

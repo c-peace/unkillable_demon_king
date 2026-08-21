@@ -99,7 +99,7 @@ class Settings:
     l2_timeout_sec: float = 90.0
     mcp_timeout_sec: float = 60.0
     l2_retries: int = 1
-    empty_output_retries: int = 1
+    empty_output_retries: int = 2
     l2_max_tokens: int = 4_096
     l2_temperature: float = 0.0
     l2_top_p: float = 1.0
@@ -116,7 +116,7 @@ class Settings:
     mcp_protocol_version: str = "2025-03-26"
     mcp_tool_mode: str = "family"
     enable_mcp: bool = True
-    enable_high_risk_review: bool = True
+    enable_high_risk_review: bool = False
     conversation_representation: str = "native"
 
     @classmethod
@@ -166,7 +166,7 @@ class Settings:
                 source.get("MAX_L2_RETRIES"), 1, minimum=0, maximum=5
             ),
             empty_output_retries=_as_int(
-                source.get("EMPTY_OUTPUT_RETRIES"), 1, minimum=0, maximum=3
+                source.get("EMPTY_OUTPUT_RETRIES"), 2, minimum=0, maximum=3
             ),
             l2_max_tokens=_as_int(
                 source.get("L2_MAX_TOKENS"),
@@ -231,7 +231,7 @@ class Settings:
             mcp_tool_mode=tool_mode,
             enable_mcp=_as_bool(source.get("ENABLE_MCP"), True),
             enable_high_risk_review=_as_bool(
-                source.get("ENABLE_HIGH_RISK_REVIEW"), True
+                source.get("ENABLE_HIGH_RISK_REVIEW"), False
             ),
             conversation_representation=representation,
         )
