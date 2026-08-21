@@ -102,7 +102,10 @@ class DriverTests(unittest.TestCase):
         )
         self.assertEqual(result.content, "최종 L2 답변")
         sent = l2.calls[0]["messages"]
-        self.assertEqual([message["role"] for message in sent[-3:]], ["user", "assistant", "user"])
+        # The conversation is followed by the harness's own system messages, so check the
+        # turns themselves rather than assuming they sit at the end of the payload.
+        conversation = [m for m in sent if m["role"] != "system"]
+        self.assertEqual([m["role"] for m in conversation[-3:]], ["user", "assistant", "user"])
         self.assertEqual(result.trace["lane"], "DIRECT")
 
     def test_direct_answer_succeeds_without_global_request_deadline(self) -> None:

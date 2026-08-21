@@ -70,8 +70,15 @@ class MemoryLaneIsIndistinguishableTest(unittest.TestCase):
     def test_the_retrieval_tool_is_never_offered_on_the_memory_lane(self) -> None:
         l2 = self._run("why does hypertension develop")
         self.assertTrue(l2.calls, "the driver made no L2 call")
+        # The memory lane may carry the commit contract; what it must never carry is a
+        # way to search, and no sign that searching was considered.
         for call in l2.calls:
-            self.assertEqual(call["tools"], [], "a retrieval tool was offered")
+            names = [
+                (tool.get("function") or {}).get("name")
+                for tool in call["tools"]
+                if isinstance(tool, dict)
+            ]
+            self.assertNotIn("retrieve_relevant_content", names)
 
     def test_nothing_in_the_prompt_records_that_a_search_was_weighed(self) -> None:
         # An answer written after the model learns a search was ruled out is a smaller

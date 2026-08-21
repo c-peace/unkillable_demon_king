@@ -11,12 +11,14 @@ from app.config import Settings
 from app.contracts import ChatCompletionRequest
 from app.conversation import CompiledConversation, compile_conversation
 from app.admission import admit
+from app.commit import COMMIT_TOOL, compose, unpack
 from app.coverage import extract_contract
 from app.deadline import Deadline
 from app.errors import AppError, UpstreamError
 from app.evidence.models import RetrievalOutcome
 from app.orchestration.retrieval import RetrievalEngine
 from app.prompts import (
+    ASK_ONE_PROMPT,
     GENERATION_AFTER_RETRIEVAL_PROMPT,
     generation_system_prompt,
     REVIEW_SYSTEM_PROMPT,
@@ -118,6 +120,7 @@ class ConversationDriver:
         ]
         if contract.is_multipart:
             messages.append({"role": "system", "content": contract.as_prompt()})
+        messages.append({"role": "system", "content": ASK_ONE_PROMPT})
         usage: dict[str, int] = {}
         l2_calls = 0
         retrieval_count = 0
@@ -137,8 +140,39 @@ class ConversationDriver:
             )
             retrieval_closed_prompt_added = True
 
+        # On the memory lane there is no retrieval to interleave, so the single generation
+        # call can be made under an output contract instead: a tool the model must call,
+        # carrying the answer and a required field for the closing question. Four attempts
+        # to get that question by instruction failed in English; the schema channel
+        # produced it on every case tried. See app/commit.py.
+        committed = 0
+        if retrieval_budget == 0:
+            generation_started = time.monotonic()
+            response = self._l2.complete(
+                messages,
+                deadline=deadline,
+                tools=[COMMIT_TOOL],
+                tool_choice="required",
+            )
+            generation_seconds += time.monotonic() - generation_started
+            l2_calls += 1
+            _sum_usage(usage, response.usage)
+            for call in response.tool_calls or ():
+                if call.name != "commit_response":
+                    continue
+                answer, question = unpack(call.arguments)
+                composed = compose(answer, question)
+                if composed:
+                    draft = composed
+                    committed = 1 if question else 2
+                break
+            if not draft and response.content:
+                # The contract did not hold. The plain answer is still an answer.
+                draft = response.content
+                committed = 3
+
         max_rounds = self._settings.max_generation_retrievals + 2
-        for _ in range(max_rounds):
+        for _ in range(max_rounds if not draft else 0):
             tools = (
                 [RETRIEVE_RELEVANT_CONTENT_TOOL]
                 if retrieval_count < retrieval_budget
@@ -292,6 +326,7 @@ class ConversationDriver:
             "revised": revised,
             "requirements": len(contract.requirements),
             "lane_admission": admission.lane,
+            "committed": committed,
             "admission_domains": ",".join(admission.domains),
             "response_chars": len(draft),
             "generation_latency_ms": round(generation_seconds * 1000),
