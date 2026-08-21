@@ -184,8 +184,10 @@ class DriverTests(unittest.TestCase):
         self.assertIn("최종 L2 답변", result.content)
 
     def test_guideline_relevant_nodes_auto_transitions_to_page_content(self) -> None:
-        # With the MCP budget spent by the auto page read, the deterministic bridge
-        # returns immediately instead of handing control back to the model.
+        # The bridge's page read no longer charges the model's tool-call allowance, but it
+        # still counts toward whether there is room to carry on. With the discovery call and
+        # the bridge read together filling the budget, the bridge returns immediately
+        # instead of handing control back to the model.
         settings = Settings(
             lunit_fm_api_key="test",
             max_retrieval_model_rounds=3,
