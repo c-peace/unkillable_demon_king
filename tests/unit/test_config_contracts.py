@@ -15,6 +15,37 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.model, "Lunit/L2-preview")
         self.assertIsNone(settings.lunit_fm_api_key)
 
+    def test_defaults_favor_family_routing_and_tighter_retrieval_budgets(self) -> None:
+        settings = Settings.from_env({})
+        self.assertEqual(settings.mcp_tool_mode, "family")
+        self.assertEqual(settings.max_retrieval_model_rounds, 3)
+        self.assertEqual(settings.max_mcp_tool_calls, 4)
+        self.assertEqual(settings.max_tool_result_chars, 8_000)
+        self.assertEqual(settings.max_evidence_items, 4)
+        self.assertEqual(settings.max_evidence_chars, 8_000)
+
+    def test_request_timeout_zero_disables_global_deadline(self) -> None:
+        settings = Settings.from_env({"REQUEST_TIMEOUT_SEC": "0"})
+        self.assertIsNone(settings.request_timeout_sec)
+
+    def test_request_timeout_empty_string_disables_global_deadline(self) -> None:
+        settings = Settings.from_env({"REQUEST_TIMEOUT_SEC": ""})
+        self.assertIsNone(settings.request_timeout_sec)
+
+    def test_empty_runtime_env_values_fall_back_to_safe_defaults(self) -> None:
+        settings = Settings.from_env(
+            {
+                "HOST": "",
+                "PORT": "",
+                "L2_TIMEOUT_SEC": "",
+                "MCP_TOOL_MODE": "",
+            }
+        )
+        self.assertEqual(settings.host, "0.0.0.0")
+        self.assertEqual(settings.port, 8000)
+        self.assertEqual(settings.l2_timeout_sec, 40.0)
+        self.assertEqual(settings.mcp_tool_mode, "family")
+
     def test_invalid_mode_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "MCP_TOOL_MODE"):
             Settings.from_env({"MCP_TOOL_MODE": "magic"})

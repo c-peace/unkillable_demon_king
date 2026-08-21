@@ -8,17 +8,33 @@ from app.errors import DeadlineExceeded
 
 @dataclass(frozen=True, slots=True)
 class Deadline:
-    expires_at: float
+    expires_at: float | None
 
     @classmethod
-    def after(cls, seconds: float) -> "Deadline":
+    def unbounded(cls) -> "Deadline":
+        """Create an execution window with no shared wall-clock cutoff.
+
+        Upstream calls still receive their own explicit timeout cap.
+        """
+        return cls(expires_at=None)
+
+    @classmethod
+    def after(cls, seconds: float | None) -> "Deadline":
+        if seconds is None:
+            return cls.unbounded()
         return cls(expires_at=time.monotonic() + seconds)
 
     def remaining(self, cap: float | None = None) -> float:
+        if self.expires_at is None:
+            if cap is None:
+                raise ValueError("an unbounded deadline requires an explicit cap")
+            return cap
         value = self.expires_at - time.monotonic()
         if value <= 0:
             raise DeadlineExceeded()
         return min(value, cap) if cap is not None else value
 
     def can_start(self, minimum_seconds: float) -> bool:
+        if self.expires_at is None:
+            return True
         return self.expires_at - time.monotonic() >= minimum_seconds

@@ -6,7 +6,7 @@ from typing import Mapping
 
 
 def _as_bool(value: str | None, default: bool) -> bool:
-    if value is None:
+    if value is None or not value.strip():
         return default
     normalized = value.strip().lower()
     if normalized in {"1", "true", "yes", "on"}:
@@ -23,7 +23,7 @@ def _as_int(
     minimum: int,
     maximum: int,
 ) -> int:
-    parsed = default if value is None else int(value)
+    parsed = default if value is None or not value.strip() else int(value)
     if not minimum <= parsed <= maximum:
         raise ValueError(f"integer must be between {minimum} and {maximum}")
     return parsed
@@ -36,9 +36,26 @@ def _as_float(
     minimum: float,
     maximum: float,
 ) -> float:
-    parsed = default if value is None else float(value)
+    parsed = default if value is None or not value.strip() else float(value)
     if not minimum <= parsed <= maximum:
         raise ValueError(f"number must be between {minimum} and {maximum}")
+    return parsed
+
+
+def _as_optional_float(
+    value: str | None,
+    default: float | None,
+    *,
+    minimum: float,
+    maximum: float,
+) -> float | None:
+    if value is None or not value.strip():
+        return default
+    parsed = float(value)
+    if parsed <= 0:
+        return None
+    if not minimum <= parsed <= maximum:
+        raise ValueError(f"number must be between {minimum} and {maximum}, or 0 to disable")
     return parsed
 
 
@@ -50,23 +67,23 @@ class Settings:
     lunit_fm_api_url: str = "https://model.hackathon.lunit.io"
     lunit_fm_api_key: str | None = None
     lunit_mcp_url: str = "https://mcp.hackathon.lunit.io/mcp"
-    request_timeout_sec: float = 90.0
+    request_timeout_sec: float | None = None
     l2_timeout_sec: float = 40.0
     mcp_timeout_sec: float = 60.0
     l2_retries: int = 1
     empty_output_retries: int = 1
     max_generation_retrievals: int = 1
-    max_retrieval_model_rounds: int = 5
-    max_mcp_tool_calls: int = 6
+    max_retrieval_model_rounds: int = 3
+    max_mcp_tool_calls: int = 4
     max_mcp_tools: int = 64
     max_request_bytes: int = 1_048_576
     max_upstream_response_bytes: int = 4_194_304
-    max_tool_result_chars: int = 16_000
+    max_tool_result_chars: int = 8_000
     max_retrieval_query_chars: int = 4_000
-    max_evidence_items: int = 8
-    max_evidence_chars: int = 16_000
+    max_evidence_items: int = 4
+    max_evidence_chars: int = 8_000
     mcp_protocol_version: str = "2025-03-26"
-    mcp_tool_mode: str = "all"
+    mcp_tool_mode: str = "family"
     enable_mcp: bool = True
     enable_high_risk_review: bool = False
     conversation_representation: str = "native"
@@ -74,10 +91,12 @@ class Settings:
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":
         source = os.environ if env is None else env
-        tool_mode = source.get("MCP_TOOL_MODE", "all").strip().lower()
+        tool_mode = (source.get("MCP_TOOL_MODE") or "family").strip().lower()
         if tool_mode not in {"all", "family"}:
             raise ValueError("MCP_TOOL_MODE must be 'all' or 'family'")
-        representation = source.get("CONVERSATION_REPRESENTATION", "native").strip().lower()
+        representation = (
+            source.get("CONVERSATION_REPRESENTATION") or "native"
+        ).strip().lower()
         if representation not in {"native", "case_packet"}:
             raise ValueError(
                 "CONVERSATION_REPRESENTATION must be 'native' or 'case_packet'"
@@ -85,18 +104,18 @@ class Settings:
 
         key = source.get("LUNIT_FM_API_KEY")
         return cls(
-            host=source.get("HOST", "0.0.0.0"),
+            host=(source.get("HOST") or "0.0.0.0").strip(),
             port=_as_int(source.get("PORT"), 8000, minimum=1, maximum=65535),
-            model=source.get("LUNIT_FM_MODEL", "Lunit/L2-preview"),
-            lunit_fm_api_url=source.get(
-                "LUNIT_FM_API_URL", "https://model.hackathon.lunit.io"
+            model=(source.get("LUNIT_FM_MODEL") or "Lunit/L2-preview").strip(),
+            lunit_fm_api_url=(
+                source.get("LUNIT_FM_API_URL") or "https://model.hackathon.lunit.io"
             ).rstrip("/"),
             lunit_fm_api_key=key.strip() if key and key.strip() else None,
-            lunit_mcp_url=source.get(
-                "LUNIT_MCP_URL", "https://mcp.hackathon.lunit.io/mcp"
+            lunit_mcp_url=(
+                source.get("LUNIT_MCP_URL") or "https://mcp.hackathon.lunit.io/mcp"
             ),
-            request_timeout_sec=_as_float(
-                source.get("REQUEST_TIMEOUT_SEC"), 90.0, minimum=1.0, maximum=600.0
+            request_timeout_sec=_as_optional_float(
+                source.get("REQUEST_TIMEOUT_SEC"), None, minimum=1.0, maximum=600.0
             ),
             l2_timeout_sec=_as_float(
                 source.get("L2_TIMEOUT_SEC"), 40.0, minimum=1.0, maximum=300.0
@@ -114,10 +133,10 @@ class Settings:
                 source.get("MAX_GENERATION_RETRIEVALS"), 1, minimum=0, maximum=4
             ),
             max_retrieval_model_rounds=_as_int(
-                source.get("MAX_RETRIEVAL_MODEL_ROUNDS"), 5, minimum=1, maximum=12
+                source.get("MAX_RETRIEVAL_MODEL_ROUNDS"), 3, minimum=1, maximum=12
             ),
             max_mcp_tool_calls=_as_int(
-                source.get("MAX_MCP_TOOL_CALLS"), 6, minimum=0, maximum=24
+                source.get("MAX_MCP_TOOL_CALLS"), 4, minimum=0, maximum=24
             ),
             max_mcp_tools=_as_int(
                 source.get("MAX_MCP_TOOLS"), 64, minimum=1, maximum=256
@@ -136,7 +155,7 @@ class Settings:
             ),
             max_tool_result_chars=_as_int(
                 source.get("MAX_TOOL_RESULT_CHARS"),
-                16_000,
+                8_000,
                 minimum=1_000,
                 maximum=100_000,
             ),
@@ -147,16 +166,16 @@ class Settings:
                 maximum=20_000,
             ),
             max_evidence_items=_as_int(
-                source.get("MAX_EVIDENCE_ITEMS"), 8, minimum=1, maximum=32
+                source.get("MAX_EVIDENCE_ITEMS"), 4, minimum=1, maximum=32
             ),
             max_evidence_chars=_as_int(
                 source.get("MAX_EVIDENCE_CHARS"),
-                16_000,
+                8_000,
                 minimum=1_000,
                 maximum=100_000,
             ),
-            mcp_protocol_version=source.get(
-                "MCP_PROTOCOL_VERSION", "2025-03-26"
+            mcp_protocol_version=(
+                source.get("MCP_PROTOCOL_VERSION") or "2025-03-26"
             ),
             mcp_tool_mode=tool_mode,
             enable_mcp=_as_bool(source.get("ENABLE_MCP"), True),

@@ -214,7 +214,7 @@ BASE_URL=http://127.0.0.1:8000 scripts/smoke_test.sh
 | --- | --- | --- | --- |
 | NFR-001 | REQUIRED | 공용 인터넷이 차단된 평가 환경에서 실행된다. | 외부 egress 차단 test |
 | NFR-002 | DECIDED | 시작 시 package/model/data download를 수행하지 않는다. | cold-start network trace |
-| NFR-003 | DECIDED | 모든 L2/MCP loop에 deadline, call budget, retry budget을 둔다. | infinite-loop fault injection |
+| NFR-003 | DECIDED | 모든 L2/MCP loop에 call budget, retry budget, per-call timeout을 둔다. 전체 wall-clock request deadline은 기본 비활성이고, 필요하면 opt-in으로만 켠다. | infinite-loop fault injection |
 | NFR-004 | DECIDED | secret과 raw clinical content를 운영 log에 기록하지 않는다. | log scan |
 | NFR-005 | DECIDED | upstream failure 시 의료 내용을 꾸며내지 않고 error 또는 L2가 표현한 제한된 불확실성으로 종료한다. | timeout/5xx/partial tests |
 | NFR-006 | DECIDED | dependency와 image 크기를 최소화해 5분 build 제한을 지킨다. | clean build benchmark |
@@ -231,7 +231,7 @@ flowchart TD
     E[Evaluator] -->|POST /v1/chat/completions\nfull messages| A[OpenAI-compatible API]
 
     subgraph C[Submitted container :8000]
-        A --> V[Request validation + deadline]
+        A --> V[Request validation + budget checks]
         V --> CC[Conversation Compiler]
         CC --> RH[(Immutable raw transcript)]
         CC --> WS[Provenance-linked working state]
@@ -565,8 +565,13 @@ Repository branch + 40-char HEAD SHA + model name
 | `LUNIT_FM_API_URL` | 예 | `https://model.hackathon.lunit.io` | L2 endpoint |
 | `LUNIT_FM_MODEL` | 예 | `Lunit/L2-preview` | 내부 L2 및 제출 model명 |
 | `LUNIT_MCP_URL` | 제안 | `https://mcp.hackathon.lunit.io/mcp` | MCP endpoint |
-| `REQUEST_TIMEOUT_SEC` | 제안 | 미확정 | 전체 request deadline보다 작게 설정 |
-| `MAX_MCP_TOOL_CALLS` | 제안 | `6` | retrieval의 MCP call 상한 |
+| `REQUEST_TIMEOUT_SEC` | 제안 | 비활성 | 전체 wall-clock request timeout. `0`, 빈 값, 또는 미설정이면 비활성 |
+| `MAX_MCP_TOOL_CALLS` | 제안 | `4` | retrieval의 MCP call 상한 |
+| `MAX_RETRIEVAL_MODEL_ROUNDS` | 제안 | `3` | retrieval stage의 L2 round 상한 |
+| `MCP_TOOL_MODE` | 제안 | `family` | 관련 tool family만 기본 노출하고 low-confidence 시 fallback |
+| `MAX_TOOL_RESULT_CHARS` | 제안 | `8000` | MCP tool result truncate 상한 |
+| `MAX_EVIDENCE_ITEMS` | 제안 | `4` | generation으로 넘기는 evidence 개수 상한 |
+| `MAX_EVIDENCE_CHARS` | 제안 | `8000` | generation evidence payload 상한 |
 | `MAX_L2_RETRIES` | 제안 | 미확정 | transient/empty-output retry 상한 |
 
 실제 secret은 source, `.env` commit, Docker `ARG`/`ENV`, test fixture, log에 넣지 않는다.
@@ -720,7 +725,7 @@ Repository branch + 40-char HEAD SHA + model name
 │   ├── config.py                  # runtime-only configuration
 │   ├── contracts.py               # OpenAI request/response validation
 │   ├── conversation.py            # raw history + case packet
-│   ├── deadline.py                # global request deadline
+│   ├── deadline.py                # shared execution budget helper
 │   ├── errors.py                  # stable OpenAI-shaped errors
 │   ├── prompts.py                 # separate generation/retrieval/review prompts
 │   ├── server.py                  # threaded HTTP server on :8000

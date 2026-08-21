@@ -138,6 +138,18 @@ class RoutingTests(unittest.TestCase):
             {"adr_retrieve_drug_info", "openapi_mfds_get_drug_indication"},
         )
 
+    def test_guideline_router_starts_at_relevant_nodes_not_document_listing(self) -> None:
+        tools = (
+            McpTool("index_list_documents", "", {}),
+            McpTool("index_get_relevant_nodes", "", {}),
+            McpTool("index_get_page_content", "", {}),
+        )
+        selected = SourceRouter("family").select("CKD 혈압 목표 guideline", tools)
+        self.assertEqual(
+            [tool.name for tool in selected],
+            ["index_get_relevant_nodes", "index_get_page_content"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
