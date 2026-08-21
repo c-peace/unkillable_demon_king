@@ -4,8 +4,8 @@
 # Generated PDF inspection artifacts
 /tmp/
 
-# Secrets and local environment
-.env
+# Submission environment bundled because the evaluator runs the image without
+# injecting LUNIT_FM_API_KEY. Keep derived/local variants ignored.
 .env.*
 !.env.example
 .venv/
