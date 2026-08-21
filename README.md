@@ -566,13 +566,17 @@ Repository branch + 40-char HEAD SHA + model name
 | `LUNIT_FM_MODEL` | 예 | `Lunit/L2-preview` | 내부 L2 및 제출 model명 |
 | `LUNIT_MCP_URL` | 제안 | `https://mcp.hackathon.lunit.io/mcp` | MCP endpoint |
 | `REQUEST_TIMEOUT_SEC` | 제안 | 비활성 | 전체 wall-clock request timeout. `0`, 빈 값, 또는 미설정이면 비활성 |
-| `MAX_MCP_TOOL_CALLS` | 제안 | `4` | retrieval의 MCP call 상한 |
-| `MAX_RETRIEVAL_MODEL_ROUNDS` | 제안 | `3` | retrieval stage의 L2 round 상한 |
+| `RETRIEVAL_TIMEOUT_SEC` | 제안 | `30` | 선택적 retrieval stage 전체 budget. 초과 시 generation으로 fail-soft 복귀 |
+| `L2_TIMEOUT_SEC` | 제안 | `60` | L2 단일 호출 timeout. timeout 요청은 중복 실행하지 않음 |
+| `L2_MAX_TOKENS` | 제안 | `4096` | L2 호출별 출력 token 상한 |
+| `MAX_MCP_TOOL_CALLS` | 제안 | `3` | retrieval의 MCP call 상한 |
+| `MAX_RETRIEVAL_MODEL_ROUNDS` | 제안 | `2` | retrieval stage의 L2 round 상한 |
 | `MCP_TOOL_MODE` | 제안 | `family` | 관련 tool family만 기본 노출하고 low-confidence 시 fallback |
 | `MAX_TOOL_RESULT_CHARS` | 제안 | `8000` | MCP tool result truncate 상한 |
 | `MAX_EVIDENCE_ITEMS` | 제안 | `4` | generation으로 넘기는 evidence 개수 상한 |
 | `MAX_EVIDENCE_CHARS` | 제안 | `8000` | generation evidence payload 상한 |
-| `MAX_L2_RETRIES` | 제안 | 미확정 | transient/empty-output retry 상한 |
+| `MAX_L2_RETRIES` | 제안 | `0` | timeout 증폭을 피하기 위한 기본 transient retry 상한 |
+| `EMPTY_OUTPUT_RETRIES` | 제안 | `0` | empty generation의 기본 재시도 상한 |
 
 실제 secret은 source, `.env` commit, Docker `ARG`/`ENV`, test fixture, log에 넣지 않는다.
 
@@ -587,6 +591,7 @@ Repository branch + 40-char HEAD SHA + model name
 - `index_get_page_content`의 structured result에서 `cite_uid`, source metadata, `pages[].text`를 확인했고 evidence registry가 이를 정규화하도록 contract test를 추가했다.
 - 일반 합성 guideline 질문의 전체 경로는 generation L2 2회, retrieval L2 4회, MCP 3회, evidence 4건으로 완료됐다. 최초 측정은 약 90.9초와 62,626 tokens였으므로, 이 수치는 성공 기준이 아니라 retrieval context/latency 최적화의 baseline이다.
 - 새로 빌드한 submission image에서도 direct L2, MCP 21-tool discovery/call, grounded L2→MCP→L2 경로가 runtime-only credential로 동작했다. 첫 grounded 요청은 HTTP `502`였고 동일 컨테이너의 한 번 재시도는 54.7초, retrieval L2 5회, MCP 5회, `partial` evidence 1건, 89,084 tokens로 성공했다. 따라서 연결 계약은 확인됐지만 transient failure와 context 비용은 해결된 것으로 보지 않는다.
+- CoEval 종료 분석 후 적용한 fail-soft image는 live grounded 요청을 31.9초에 완료했다. 단계별 측정값은 generation 17.4초, retrieval 14.5초였고 retrieval 내부에서 L2 1회와 MCP 2회를 사용했다. 별도의 tool-free 요청도 L2 1회에 27.9초가 걸려, 현재 주 병목은 MCP 자체보다 L2 latency임을 확인했다. timeout 요청을 반복하지 않고 선택적 retrieval만 30초로 제한해 이 병목이 전체 benchmark 실행시간으로 증폭되는 것을 막는다.
 
 이는 **개발 환경의 non-streaming 경로**에 대한 관찰이다. evaluator container의 credential 주입/내부 연결, streaming, parallel tool calls, rate limit은 아직 확정하지 않는다.
 

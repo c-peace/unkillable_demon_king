@@ -12,6 +12,10 @@ class HttpTransportError(Exception):
     pass
 
 
+class HttpTimeoutError(HttpTransportError):
+    pass
+
+
 class HttpStatusError(HttpTransportError):
     def __init__(self, status: int, body: bytes = b"") -> None:
         super().__init__(f"upstream HTTP {status}")
@@ -67,5 +71,11 @@ def post_json(
         except HttpTransportError:
             body = b""
         raise HttpStatusError(exc.code, body) from exc
-    except (urllib.error.URLError, TimeoutError, socket.timeout, OSError) as exc:
+    except urllib.error.URLError as exc:
+        if isinstance(exc.reason, (TimeoutError, socket.timeout)):
+            raise HttpTimeoutError("upstream request timed out") from exc
+        raise HttpTransportError("upstream connection failed") from exc
+    except (TimeoutError, socket.timeout) as exc:
+        raise HttpTimeoutError("upstream request timed out") from exc
+    except OSError as exc:
         raise HttpTransportError("upstream connection failed") from exc

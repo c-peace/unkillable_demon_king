@@ -162,6 +162,7 @@ class HttpClientIntegrationTests(unittest.TestCase):
             self.assertEqual(FakeL2Handler.attempts, 2)
             self.assertEqual(FakeL2Handler.authorization, "Bearer test-secret")
             self.assertEqual(FakeL2Handler.received["model"], "Lunit/L2-preview")
+            self.assertEqual(FakeL2Handler.received["max_tokens"], 4_096)
         finally:
             server.shutdown()
             server.server_close()

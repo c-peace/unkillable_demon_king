@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import re
 import time
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
-from app.clients.http import HttpStatusError, HttpTransportError, post_json
+from app.clients.http import HttpStatusError, HttpTimeoutError, HttpTransportError, post_json
 from app.config import Settings
 from app.deadline import Deadline
 from app.errors import ConfigurationError, UpstreamError
+
+
+LOGGER = logging.getLogger("lunit_l2")
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,10 +206,12 @@ class L2Client:
         payload: dict[str, Any] = {
             "model": self._settings.model,
             "messages": [dict(message) for message in messages],
+            "max_tokens": self._settings.l2_max_tokens,
         }
         if tools:
             payload["tools"] = [dict(tool) for tool in tools]
             payload["tool_choice"] = "auto"
+            payload["parallel_tool_calls"] = False
 
         empty_attempts = self._settings.empty_output_retries + 1
         last_response: L2Response | None = None
@@ -221,6 +227,7 @@ class L2Client:
         attempts = self._settings.l2_retries + 1
         last_error: Exception | None = None
         for attempt in range(attempts):
+            attempt_started = time.monotonic()
             try:
                 response = post_json(
                     f"{self._settings.lunit_fm_api_url}/v1/chat/completions",
@@ -232,7 +239,25 @@ class L2Client:
                     timeout=deadline.remaining(self._settings.l2_timeout_sec),
                     max_response_bytes=self._settings.max_upstream_response_bytes,
                 )
-                return _parse_response(response.json())
+                parsed = _parse_response(response.json())
+                LOGGER.info(
+                    "l2_call_completed attempt=%s latency_ms=%s tool_calls=%s content_chars=%s",
+                    attempt + 1,
+                    round((time.monotonic() - attempt_started) * 1000),
+                    len(parsed.tool_calls),
+                    len(parsed.content),
+                )
+                return parsed
+            except HttpTimeoutError as exc:
+                LOGGER.warning(
+                    "l2_call_timeout attempt=%s latency_ms=%s",
+                    attempt + 1,
+                    round((time.monotonic() - attempt_started) * 1000),
+                )
+                raise UpstreamError(
+                    "L2 request exceeded its per-call timeout",
+                    code="l2_timeout",
+                ) from exc
             except HttpStatusError as exc:
                 last_error = exc
                 if exc.status not in {408, 409, 425, 429} and exc.status < 500:
@@ -242,6 +267,13 @@ class L2Client:
                     ) from exc
             except HttpTransportError as exc:
                 last_error = exc
+
+            LOGGER.warning(
+                "l2_call_retryable_failure attempt=%s max_attempts=%s latency_ms=%s",
+                attempt + 1,
+                attempts,
+                round((time.monotonic() - attempt_started) * 1000),
+            )
 
             if attempt + 1 < attempts and deadline.can_start(0.5):
                 delay = min(0.25 * math.pow(2, attempt), 1.0, deadline.remaining(1.0))

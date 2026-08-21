@@ -297,6 +297,49 @@ class DriverTests(unittest.TestCase):
         )
         self.assertIn('"status": "no_evidence"', tool_message["content"])
 
+    def test_retrieval_uses_its_own_stage_budget_without_global_deadline(self) -> None:
+        settings = Settings(
+            lunit_fm_api_key="test",
+            request_timeout_sec=None,  # type: ignore[arg-type]
+            retrieval_timeout_sec=0.05,
+        )
+        generation_l2 = ScriptedL2(
+            [
+                l2_tool_call(
+                    "gen-call",
+                    "retrieve_relevant_content",
+                    {"query": "근거가 필요한 질문"},
+                ),
+                l2_content("검색 실패 후에도 L2가 생성한 최종 답변"),
+            ]
+        )
+
+        class BudgetCapturingRetrieval:
+            remaining = None
+
+            def run(self, query: str, *, deadline):
+                self.remaining = deadline.remaining(1.0)
+                raise UpstreamError("retrieval failed", code="retrieval_budget_test")
+
+        retrieval = BudgetCapturingRetrieval()
+        driver = ConversationDriver(
+            settings,
+            l2=generation_l2,
+            retrieval=retrieval,  # type: ignore[arg-type]
+        )
+        result = driver.complete(
+            ChatCompletionRequest(
+                model=settings.model,
+                messages=({"role": "user", "content": "질문"},),
+            ),
+            request_id="req-retrieval-budget",
+        )
+
+        self.assertIsNotNone(retrieval.remaining)
+        self.assertGreater(retrieval.remaining, 0)
+        self.assertLessEqual(retrieval.remaining, 0.05)
+        self.assertEqual(result.content, "검색 실패 후에도 L2가 생성한 최종 답변")
+
 
 if __name__ == "__main__":
     unittest.main()
