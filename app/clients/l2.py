@@ -154,7 +154,7 @@ class L2Client:
             if last_response.content or last_response.tool_calls:
                 return last_response
             if empty_attempt + 1 < empty_attempts and deadline.can_start(0.25):
-                time.sleep(min(0.1, deadline.remaining()))
+                time.sleep(min(0.1, deadline.remaining(0.1)))
         raise UpstreamError("L2 returned an empty message", code="empty_l2_response")
 
     def _post_with_retry(self, payload: dict[str, Any], *, deadline: Deadline) -> L2Response:
@@ -184,6 +184,6 @@ class L2Client:
                 last_error = exc
 
             if attempt + 1 < attempts and deadline.can_start(0.5):
-                delay = min(0.25 * math.pow(2, attempt), 1.0, deadline.remaining())
+                delay = min(0.25 * math.pow(2, attempt), 1.0, deadline.remaining(1.0))
                 time.sleep(delay)
         raise UpstreamError("L2 request failed after bounded retries", code="l2_unavailable") from last_error
