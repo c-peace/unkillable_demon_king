@@ -40,11 +40,12 @@ Harden and evaluate the implemented Lunit L2 multi-turn conversation driver, the
 - Documented the advanced target architecture in `references/advanced-harness-design.md`: progressive execution lanes, request-local clinical state, claim-driven MCP retrieval, evidence registry/provenance verification, and conditional L2 review/revision.
 - Reviewed five supplied papers (87 pages total) and captured their generalizable findings, evidence limitations, conflicts, anti-reverse-engineering boundaries, and architecture implications in `references/literature-synthesis.md`.
 - Replaced the placeholder root README with a paper-style public design and requirements specification covering required submission/API/L2 contracts, multi-turn context, evidence/RAG behavior, reliability, test/ablation strategy, milestone sequencing, planned source structure, open risks, and final submission gates.
-- Implemented `GET /v1/models`, `POST /v1/chat/completions`, OpenAI-shaped errors, stateless full-message handling, bounded request deadlines, privacy-safe traces, and graceful SIGTERM shutdown.
+- Implemented `GET /v1/models`, `POST /v1/chat/completions`, OpenAI-shaped errors, stateless full-message handling, optional global request deadlines, privacy-safe traces, and graceful SIGTERM shutdown.
 - Implemented the Bearer-authenticated L2 Chat Completions adapter with transient retry, empty-output retry, current and legacy tool-call parsing, and optional native-message or role-labelled case-packet representation.
 - Implemented a Streamable HTTP MCP client with initialize/initialized, session handling, JSON or SSE responses, dynamic `tools/list`, `tools/call`, configurable protocol version, and session recovery.
 - Implemented the Generation -> `retrieve_relevant_content` -> Retrieval L2/MCP -> `finalize_retrieval` -> Generation path, including source routing, evidence registry, unknown-citation rejection, structural sufficiency validation, and bounded `partial`/`no_evidence` fallback.
 - Implemented feature-flagged high-risk audit and at most one final L2 revision, plus a bounded three-turn Patient Simulator development script.
+- Tightened the latency-oriented default runtime after the evaluator failure analysis: the shared request deadline stays disabled by default, retrieval uses compact family routing plus smaller evidence budgets, repeated identical MCP calls are cached within a request, retrieval prompts now expose explicit remaining budgets, and bounded retrieval failure no longer forwards internal error codes into final-generation context.
 - Verified the development L2 endpoint with a basic request and the standard OpenAI non-streaming tool-call/tool-result continuation contract. The endpoint can return `finish_reason: "stop"` alongside `message.tool_calls`, and the adapter correctly uses the latter as authoritative.
 - Discovered all 21 live MCP schemas, negotiated protocol `2025-03-26`, observed successful stateless JSON calls, and validated the structured `index_get_page_content` citation shape.
 - Completed a general synthetic guideline request through Generation -> Retrieval L2 -> three MCP calls -> `finalize_retrieval` -> final L2 generation, selecting four evidence items without retaining raw clinical content in project state.
@@ -66,6 +67,7 @@ Harden and evaluate the implemented Lunit L2 multi-turn conversation driver, the
 - Preserve both the full raw history and a structured clinical working memory with provenance for safety-critical facts; any summarization or compression must never silently alter medications, dosages, allergies, pregnancy, timing, negation, or prior corrections.
 - Keep retrieval source selection explicit and authority-ranked by task type, with fallback when router confidence is low, rather than exposing every MCP tool to every question by default.
 - Use progressive `DIRECT`, `CLARIFY`, `GROUNDED`, and `HIGH-RISK` lanes so advanced retrieval, verification, and revision run only when their expected benefit justifies their latency and failure surface.
+- Keep the global wall-clock request deadline disabled by default. Bound execution with per-call L2/MCP timeouts, retrieval/tool-call budgets, and smaller evidence payloads instead of a hard end-to-end cutoff.
 - Treat `cite_uid` provenance and the request-local evidence registry as a core subsystem; never pass arbitrary raw retrieval traces or unknown citation identifiers into the final answer path.
 - Use a provenance-linked dual-track response contract: clinical/evidence requirements plus interaction/context requirements.
 - Make retrieval gap-aware and sufficiency-driven; continue only for named unsupported claims and bound depth because additional rounds can add noise.
@@ -77,6 +79,7 @@ Harden and evaluate the implemented Lunit L2 multi-turn conversation driver, the
 ## Verification evidence
 
 - `python3 /Users/peace/.codex/skills/.system/skill-creator/scripts/quick_validate.py .agents/skills/hackathon-submission` reported `Skill is valid!` after the continuity setup.
+- `python3 -m py_compile app/config.py app/deadline.py app/orchestration/driver.py app/orchestration/retrieval.py app/evidence/routing.py app/prompts.py` completed without syntax errors after the latency-oriented runtime changes.
 - `AGENTS.md`, `SKILL.md`, `current-state.md`, and `.omx/notepad.md` were verified to exist and be non-empty.
 - `.omx/notepad.md` Priority Context measured 316 characters, below the 500-character limit.
 - `git remote -v` confirmed `origin` fetch/push URLs target `c-peace/unkillable_demon_king`.
@@ -86,8 +89,8 @@ Harden and evaluate the implemented Lunit L2 multi-turn conversation driver, the
 - `git ls-remote https://github.com/openai/simple-evals.git HEAD` returned `652c89d0ca9df547706735883097e9537d40dc47`; the public `healthbench_eval.py`, runner integration, and chat-completion sampler were inspected without downloading benchmark data.
 - All five PDFs under `reference/` were extracted and all 87 pages rendered; complete contact sheets plus original-resolution architecture/result pages were visually checked.
 - Root `README.md` contains 838 lines and all expected architecture, requirements, quick-start, implementation-status, and submission sections; `git diff --check` completed without whitespace errors after the implementation update.
-- `python3 -m unittest discover -s tests -v` passed 24 unit/contract/fake integration tests covering multi-turn preservation, direct generation, retrieval/finalizer, citation validation, live page-content normalization, missing-finalizer degradation, L2 HTTP retry/tool parsing, MCP JSON/SSE/session behavior, concurrent stateless API requests, error envelopes, and optional review/revision.
-- The complete 24-test suite passed under the submission-aligned `python:3.13-slim` container environment.
+- `python3 -m unittest discover -s tests -v` now passes 30 unit/contract/fake integration tests covering multi-turn preservation, direct generation, retrieval/finalizer, citation validation, live page-content normalization, missing-finalizer degradation, retrieval-failure degradation, L2 HTTP retry/tool parsing, optional global-deadline disablement, empty-env fallback, MCP JSON/SSE/session behavior, concurrent stateless API requests, error envelopes, and optional review/revision.
+- The complete 30-test suite passes under the local Python environment; submission-aligned container re-verification is still recommended after any further latency-path changes.
 - The latest root Docker no-cache build completed locally in 3.1 seconds with a cached base image; the final image was 43,328,761 bytes, exposed `8000/tcp`, ran as numeric non-root user `65534:65534`, and contained no API key in image configuration/history.
 - The built container called a fake host L2 endpoint with Bearer authentication and returned a valid multi-turn OpenAI completion; its privacy-safe trace recorded one L2 call and no raw message content.
 - The container started and served `/healthz` successfully with `--network none`, proving startup has no external dependency. SIGTERM shutdown completed with exit code 0.
@@ -100,6 +103,9 @@ Harden and evaluate the implemented Lunit L2 multi-turn conversation driver, the
 - A fresh `lunit-hackathon-driver:healthbench-smoke` no-cache build completed in 1.32 seconds locally. The image ran without manual initialization as `65534:65534`, exposed and bound container port 8000 to host `0.0.0.0:8000`, passed `/healthz`, `/v1/models`, `scripts/smoke_test.sh`, image-history secret scanning, and the complete 24-test Python 3.13 suite.
 - The single public-paper smoke conversation returned HTTP `200` in 77.254 seconds with a non-empty L2 assistant response, `finish_reason: stop`, and 2,061 reported tokens. The privacy-safe trace recorded `GROUNDED`, two generation L2 calls, one retrieval request, zero completed retrieval L2/MCP calls, no evidence, and 1,604 response characters. A subsequent isolated MCP discovery from the same container returned 21 tools, so the failed retrieval stage is an observed transient/deadline-path failure rather than proof that container MCP connectivity is absent.
 - General HealthBench-axis review, not an official benchmark score: the response used the multi-turn context and asked useful questions about age, feeding, wet nappies, and breathing, but exposed an internal retrieval failure, omitted some high-value red flags such as temperature and color, and made prompt in-person assessment too conditional for a newly less-active or potentially weak infant. Official pediatric guidance treats a floppy, very weak, difficult-to-wake, or non-moving infant as requiring urgent or emergency assessment.
+- The exact evaluation failure reported by the user was not reproducible locally from submitted commit `3abc99b08ee4224f0066fbafe02c4e77d1a0d380`: a clean archive build of that SHA started successfully and stayed running on `0.0.0.0:8000` under `docker start --attach`. The evaluator log tail therefore shows a wrapper-level container exit (`exit 1`), but not the underlying container stderr that caused it.
+- `docker build -t lunit-hackathon-driver:optimize-check .` completed successfully after the latency-oriented runtime changes.
+- `docker run --rm -d -p 18000:8000 --name lunit-optimize-check lunit-hackathon-driver:optimize-check`, `curl http://127.0.0.1:18000/healthz`, `curl http://127.0.0.1:18000/v1/models`, and `docker stop lunit-optimize-check` confirmed that the optimized image still starts automatically and serves the required container boundary.
 
 ## Open questions and blockers
 
@@ -110,14 +116,16 @@ Harden and evaluate the implemented Lunit L2 multi-turn conversation driver, the
 - Live Patient Simulator behavior, streaming, parallel tool calls, context limits, and rate/concurrency limits remain unverified.
 - The first full grounded live request took about 91 seconds and 62.6k tokens; retrieval prompt/context compaction and latency budgets require measured optimization.
 - The public-paper smoke run completed within the configured deadline but took 77.25 seconds and lost retrieval evidence before final generation. The user-facing response also disclosed the internal retrieval failure and showed possible under-triage; both are release-blocking quality issues for grounded/high-risk paths.
+- The current evaluator failure cannot yet be rooted to a code path because the provided log tail omits the container stderr line immediately before the `docker start --attach` wrapper exception.
+- The previous global `REQUEST_TIMEOUT_SEC=90` path is no longer the default bottleneck. Current defaults favor `family` MCP routing, fewer retrieval rounds/tool calls, smaller evidence payloads, and retrieval-step deduplication while keeping per-call upstream timeouts in place.
 
 ## Next actions
 
-1. Prevent internal retrieval errors from appearing in user-facing text; provide a clinical-safe degraded instruction and preserve the operational error only in content-free traces.
-2. Reduce retrieval token and latency cost with source-family exposure, page-content compaction, and measured tool/L2 budgets while preserving citation integrity.
+1. Re-run one privacy-safe live grounded container smoke and compare latency/token usage against the earlier ~55-91 second grounded runs, because this turn only re-verified unit/integration and container-boundary contracts.
 3. Add synthetic high-risk pediatric triage regressions based on general clinical capabilities, not the public HealthBench example, and evaluate whether conditional review improves escalation without blanket over-triage.
 4. Add an automated privacy-safe connected smoke path that distinguishes transient upstream failures from deterministic contract failures without logging content or credentials.
 5. Run Patient Simulator, systematic ablations, and dashboard aggregate validation before creating the final `lunit/hackathon-submission` branch and verifying the full SHA/model.
+6. Collect the full container stderr from the failed trial, because the current evidence only proves that the container exited with code 1 after `docker start --attach`.
 
 ## Update protocol
 

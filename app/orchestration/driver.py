@@ -83,7 +83,11 @@ class ConversationDriver:
         request_id: str,
     ) -> DriverResult:
         started = time.monotonic()
-        deadline = Deadline.after(self._settings.request_timeout_sec)
+        deadline = (
+            Deadline.unbounded()
+            if self._settings.request_timeout_sec is None
+            else Deadline.after(self._settings.request_timeout_sec)
+        )
         compiled = compile_conversation(request.messages)
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": GENERATION_SYSTEM_PROMPT},
@@ -158,11 +162,20 @@ class ConversationDriver:
                         max_chars=self._settings.max_evidence_chars
                     )
                 except AppError as exc:
+                    LOGGER.warning(
+                        "bounded retrieval failure",
+                        extra={
+                            "request_id": request_id,
+                            "retrieval_error": exc.code,
+                        },
+                    )
                     content = json.dumps(
                         {
                             "status": "no_evidence",
-                            "note": "Retrieval failed within its bounded execution path.",
-                            "error": exc.code,
+                            "note": (
+                                "Authoritative retrieval was unavailable within the bounded "
+                                "evidence path. Answer conservatively without unsupported claims."
+                            ),
                             "evidence": [],
                         },
                         ensure_ascii=False,
