@@ -35,6 +35,11 @@ VALID_TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 # material while consuming the whole tool-call budget.
 MAX_CALLS_PER_TOOL = 2
 
+# Consecutive tool calls returning no citable evidence before retrieval is pushed to
+# finalize. The organizers warn that a model floundering over tool calls is what
+# produces very long timeouts, so stalling has to end the loop rather than extend it.
+MAX_NO_PROGRESS_CALLS = 2
+
 
 FINALIZE_RETRIEVAL_TOOL: dict[str, Any] = {
     "type": "function",
@@ -570,6 +575,13 @@ class RetrievalEngine:
         mcp_budget_exhausted = False
         tool_cache: dict[str, str] = {}
         tool_use_counts: dict[str, int] = {}
+        # The deterministic page bridge is our own chaining, not the model spending its
+        # budget, so it is counted separately and reported without charging the model.
+        bridge_calls = 0
+        seen_semantic: list[tuple[str, frozenset[str]]] = []
+        duplicate_blocked = 0
+        invalid_calls = 0
+        no_progress = 0
 
         while model_rounds < self._settings.max_retrieval_model_rounds:
             if not deadline.can_start(0.25):
@@ -590,6 +602,9 @@ class RetrievalEngine:
                 not mcp_budget_exhausted
                 and mcp_calls < self._settings.max_mcp_tool_calls
                 and model_rounds < self._settings.max_retrieval_model_rounds - 1
+                # Two searches in a row returning nothing citable means this line of enquiry
+                # is not paying off; more of it burns the budget and the clock.
+                and no_progress < MAX_NO_PROGRESS_CALLS
             )
             round_tools = (
                 retrieval_tools
@@ -878,6 +893,35 @@ class RetrievalEngine:
                         }
                     )
                     continue
+                semantic_tokens = _semantic_tokens(tool.name, arguments)
+                if _is_near_duplicate(semantic_tokens, seen_semantic):
+                    # Same search, different wording. Running it again costs a tool call and
+                    # returns what we already hold, so refuse and push toward finalizing.
+                    duplicate_blocked += 1
+                    LOGGER.info(
+                        "retrieval_duplicate_blocked tool=%s total=%s",
+                        tool.name,
+                        duplicate_blocked,
+                    )
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": call.id,
+                            "content": json.dumps(
+                                {
+                                    "error": "already_searched",
+                                    "instruction": (
+                                        "You already ran this search. Use the evidence you "
+                                        "have, search a genuinely different evidence need, "
+                                        "or call finalize_retrieval now."
+                                    ),
+                                },
+                                ensure_ascii=False,
+                            ),
+                        }
+                    )
+                    continue
+                seen_semantic.append(semantic_tokens)
                 try:
                     emit_event(
                         LOGGER,
@@ -959,7 +1003,7 @@ class RetrievalEngine:
                                     page_arguments,
                                     deadline=deadline,
                                 )
-                                mcp_calls += 1
+                                bridge_calls += 1
                                 tool_use_counts[page_content_tool.name] = (
                                     tool_use_counts.get(page_content_tool.name, 0) + 1
                                 )
@@ -1001,8 +1045,12 @@ class RetrievalEngine:
                                 # The deterministic bridge grabs the first plausible page, which
                                 # may be off-topic. Short-circuit only when no budget remains to
                                 # verify or extend it; otherwise let the model judge sufficiency.
+                                # The model keeps its full tool-call allowance, but whether
+                                # there is room to carry on is about work actually done, so
+                                # this check counts the bridge's own call too.
                                 bridge_budget_left = (
-                                    mcp_calls < self._settings.max_mcp_tool_calls
+                                    mcp_calls + bridge_calls
+                                    < self._settings.max_mcp_tool_calls
                                     and model_rounds
                                     < self._settings.max_retrieval_model_rounds - 1
                                 )
@@ -1036,7 +1084,7 @@ class RetrievalEngine:
                                         l2_calls=model_rounds,
                                     )
                             except AppError as exc:
-                                mcp_calls += 1
+                                bridge_calls += 1
                                 tool_use_counts[page_content_tool.name] = (
                                     tool_use_counts.get(page_content_tool.name, 0) + 1
                                 )
@@ -1093,10 +1141,20 @@ class RetrievalEngine:
             if should_stop_after_turn:
                 break
 
-        if mcp_budget_exhausted:
-            note = "Retrieval ended because the MCP tool-call budget was exhausted."
-        elif model_rounds >= self._settings.max_retrieval_model_rounds:
-            note = "Retrieval ended because the retrieval model-round budget was exhausted."
+        LOGGER.info(
+            "retrieval_guard rounds=%s mcp_calls=%s bridge_calls=%s duplicates=%s "
+            "invalid=%s no_progress=%s",
+            model_rounds, mcp_calls, bridge_calls, duplicate_blocked,
+            invalid_calls, no_progress,
+        )
+        # These notes travel to the generation stage and models have been observed relaying
+        # them verbatim to the user, so they say what the evidence amounts to rather than
+        # narrating our internal limits. A reader must never hear about budgets.
+        if len(registry):
+            note = (
+                "The evidence gathered is partial. Use what it supports, and answer the "
+                "rest from established medical knowledge without citing it."
+            )
         else:
             note = "Retrieval ended at the configured round, tool-call, or time budget."
         outcome = (
@@ -1113,7 +1171,7 @@ class RetrievalEngine:
                 query=query_text,
                 note=note,
                 model_rounds=model_rounds,
-                mcp_calls=mcp_calls,
+                mcp_calls=mcp_calls + bridge_calls,
                 max_items=self._settings.max_evidence_items,
             )
         )

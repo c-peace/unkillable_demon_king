@@ -113,7 +113,7 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(result.trace["representation"], "native")
 
     def test_direct_answer_succeeds_without_global_request_deadline(self) -> None:
-        settings = Settings(lunit_fm_api_key="test", request_timeout_sec=None)  # type: ignore[arg-type]
+        settings = Settings(enable_high_risk_review=False, lunit_fm_api_key="test", request_timeout_sec=None)  # type: ignore[arg-type]
         l2 = ScriptedL2([l2_content("데드라인 없이도 최종 답변")])
         driver = ConversationDriver(settings, l2=l2, retrieval=NeverRetrieval())  # type: ignore[arg-type]
         result = driver.complete(
@@ -126,7 +126,7 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(result.content, "데드라인 없이도 최종 답변")
 
     def test_generation_retrieval_generation_path(self) -> None:
-        settings = Settings(
+        settings = Settings(enable_high_risk_review=False, 
             lunit_fm_api_key="test",
             max_retrieval_model_rounds=3,
             max_generation_retrievals=1,
@@ -191,8 +191,10 @@ class DriverTests(unittest.TestCase):
         self.assertIn("최종 L2 답변", result.content)
 
     def test_guideline_relevant_nodes_auto_transitions_to_page_content(self) -> None:
-        # With the MCP budget spent by the auto page read, the deterministic bridge
-        # returns immediately instead of handing control back to the model.
+        # The bridge's page read no longer charges the model's tool-call allowance, but it
+        # still counts toward whether there is room to carry on. With the discovery call and
+        # the bridge read together filling the budget, the bridge returns immediately
+        # instead of handing control back to the model.
         settings = Settings(
             lunit_fm_api_key="test",
             max_retrieval_model_rounds=3,
@@ -314,7 +316,7 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(run.outcome.evidence[0].cite_uid, "cite-guideline")
 
     def test_retrieval_failure_still_returns_final_l2_answer(self) -> None:
-        settings = Settings(lunit_fm_api_key="test")
+        settings = Settings(enable_high_risk_review=False, lunit_fm_api_key="test")
         generation_l2 = ScriptedL2(
             [
                 l2_tool_call(
@@ -351,7 +353,7 @@ class DriverTests(unittest.TestCase):
         self.assertIn('"status": "no_evidence"', tool_message["content"])
 
     def test_retrieval_uses_its_own_stage_budget_without_global_deadline(self) -> None:
-        settings = Settings(
+        settings = Settings(enable_high_risk_review=False, 
             lunit_fm_api_key="test",
             request_timeout_sec=None,  # type: ignore[arg-type]
             retrieval_timeout_sec=0.05,

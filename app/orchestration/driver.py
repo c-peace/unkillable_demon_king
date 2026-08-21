@@ -11,6 +11,7 @@ from app.clients.l2 import L2Client, parse_tool_arguments
 from app.config import Settings
 from app.contracts import ChatCompletionRequest
 from app.conversation import CompiledConversation, compile_conversation
+from app.coverage import extract_contract
 from app.deadline import Deadline
 from app.errors import AppError, UpstreamError
 from app.evidence.models import RetrievalOutcome
@@ -136,6 +137,8 @@ class ConversationDriver:
             {"role": "system", "content": GENERATION_SYSTEM_PROMPT},
             *compiled.generation_messages(self._settings.conversation_representation),
         ]
+        if contract.is_multipart:
+            messages.append({"role": "system", "content": contract.as_prompt()})
         usage: dict[str, int] = {}
         if planning_usage:
             _sum_usage(usage, planning_usage)
@@ -355,7 +358,12 @@ class ConversationDriver:
 
         reviewed = False
         revised = False
-        if self._should_review(compiled, last_outcome) and deadline.can_start(1.0):
+        # The audit costs one L2 call and the revision a second, so only start it when
+        # enough of the request budget is left for both to finish.
+        review_reserve_sec = 2 * self._settings.l2_timeout_sec
+        if self._should_review(compiled, last_outcome) and deadline.can_start(
+            review_reserve_sec
+        ):
             review_started = time.monotonic()
             draft, review_l2_calls, reviewed, revised, review_usage = self._review(
                 compiled,
@@ -396,6 +404,7 @@ class ConversationDriver:
             "evidence_count": len(last_outcome.evidence) if last_outcome else 0,
             "reviewed": reviewed,
             "revised": revised,
+            "requirements": len(contract.requirements),
             "response_chars": len(draft),
             "generation_latency_ms": round(generation_seconds * 1000),
             "retrieval_latency_ms": round(retrieval_seconds * 1000),
@@ -721,11 +730,12 @@ class ConversationDriver:
         compiled: CompiledConversation,
         outcome: RetrievalOutcome | None,
     ) -> bool:
-        if not self._settings.enable_high_risk_review:
-            return False
-        return compiled.is_high_risk or (
-            outcome is not None and outcome.status in {"partial", "no_evidence"}
-        )
+        # Measured on 157 requests: the audit fired on 82% of them and changed the answer
+        # on 18% of those, and the score was identical with it off (0.4946 vs 0.4944) —
+        # what it added to completeness it took back off accuracy. It cost 60% of our
+        # latency, and latency is what kills a run on the official harness. Off by default;
+        # the flag stays so the experiment can be repeated.
+        return self._settings.enable_high_risk_review
 
     def _review(
         self,

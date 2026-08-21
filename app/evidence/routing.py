@@ -30,7 +30,16 @@ ROUTING_RULES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     ),
     (
         re.compile(
-            r"상호작용|병용|금기|부작용|경고|adverse|interaction|contraindication|warning",
+            # Patients do not say 상호작용 or 금기. They ask whether two medicines can be
+            # taken together, or whether something is safe to take at all, so the natural
+            # phrasings have to route here as well as the clinical vocabulary.
+            r"상호작용|병용|금기|부작용|이상반응|경고|"
+            r"같이\s*(먹|복용|드시|투여)|함께\s*(먹|복용|드시|투여)|동시에\s*(먹|복용)|"
+            r"먹어도\s*(되|괜찮|안전)|복용해도\s*(되|괜찮|안전)|드셔도\s*(되|괜찮)|"
+            r"먹으면\s*안|피해야|위험하지|괜찮을까|안전한가|"
+            r"adverse|interaction|contraindication|warning|safe to take|"
+            r"take\s+(?:\w+\s+){0,3}(?:together|with)|combine|"
+            r"can i (?:take|use|have)|is it (?:ok|okay|safe)",
             re.IGNORECASE,
         ),
         (
@@ -103,6 +112,20 @@ ROUTING_RULES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
             "adr_retrieve_drug_info",
         ),
     ),
+)
+
+
+# The evidence domain each routing rule stands for, in the same order. Traced per request
+# so failures can be read by domain, and the key any per-route tuning would use.
+ROUTE_LABELS: tuple[str, ...] = (
+    "guideline",
+    "drug_safety",
+    "drug",
+    "hira",
+    "coding",
+    "law",
+    "research",
+    "faers",
 )
 
 
