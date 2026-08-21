@@ -96,11 +96,7 @@ class Settings:
     lunit_mcp_url: str = "https://mcp.hackathon.lunit.io/mcp"
     request_timeout_sec: float | None = 240.0
     retrieval_timeout_sec: float | None = 90.0
-    # A single generation call is the whole memory lane, and the request budget is 240s.
-    # Cutting that call off at 90s turns a slow answer into a 502, which the evaluator
-    # scores zero — observed when the shared endpoint saturated near the deadline and even
-    # a one-word prompt exceeded 90s. A late answer beats no answer.
-    l2_timeout_sec: float = 150.0
+    l2_timeout_sec: float = 90.0
     mcp_timeout_sec: float = 60.0
     l2_retries: int = 1
     empty_output_retries: int = 2
@@ -161,7 +157,7 @@ class Settings:
                 maximum=300.0,
             ),
             l2_timeout_sec=_as_float(
-                source.get("L2_TIMEOUT_SEC"), 150.0, minimum=1.0, maximum=300.0
+                source.get("L2_TIMEOUT_SEC"), 90.0, minimum=1.0, maximum=300.0
             ),
             mcp_timeout_sec=_as_float(
                 source.get("MCP_TIMEOUT_SEC"), 60.0, minimum=1.0, maximum=300.0
