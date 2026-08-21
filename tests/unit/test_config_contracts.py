@@ -15,27 +15,29 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.model, "Lunit/L2-preview")
         self.assertIsNone(settings.lunit_fm_api_key)
 
-    def test_defaults_favor_family_routing_and_tighter_retrieval_budgets(self) -> None:
+    def test_defaults_favor_family_routing_and_iterative_retrieval_budgets(self) -> None:
         settings = Settings.from_env({})
         self.assertEqual(settings.mcp_tool_mode, "family")
         self.assertEqual(settings.l2_timeout_sec, 60.0)
-        self.assertEqual(settings.l2_retries, 0)
-        self.assertEqual(settings.empty_output_retries, 0)
+        self.assertEqual(settings.l2_retries, 1)
+        self.assertEqual(settings.empty_output_retries, 1)
         self.assertEqual(settings.l2_max_tokens, 4_096)
-        self.assertEqual(settings.retrieval_timeout_sec, 30.0)
-        self.assertEqual(settings.max_retrieval_model_rounds, 2)
-        self.assertEqual(settings.max_mcp_tool_calls, 3)
+        self.assertEqual(settings.request_timeout_sec, 240.0)
+        self.assertEqual(settings.retrieval_timeout_sec, 120.0)
+        self.assertEqual(settings.max_generation_retrievals, 2)
+        self.assertEqual(settings.max_retrieval_model_rounds, 5)
+        self.assertEqual(settings.max_mcp_tool_calls, 6)
         self.assertEqual(settings.max_tool_result_chars, 8_000)
-        self.assertEqual(settings.max_evidence_items, 4)
+        self.assertEqual(settings.max_evidence_items, 8)
         self.assertEqual(settings.max_evidence_chars, 8_000)
 
     def test_request_timeout_zero_disables_global_deadline(self) -> None:
         settings = Settings.from_env({"REQUEST_TIMEOUT_SEC": "0"})
         self.assertIsNone(settings.request_timeout_sec)
 
-    def test_request_timeout_empty_string_disables_global_deadline(self) -> None:
+    def test_request_timeout_empty_string_falls_back_to_the_default_deadline(self) -> None:
         settings = Settings.from_env({"REQUEST_TIMEOUT_SEC": ""})
-        self.assertIsNone(settings.request_timeout_sec)
+        self.assertEqual(settings.request_timeout_sec, 240.0)
 
     def test_empty_runtime_env_values_fall_back_to_safe_defaults(self) -> None:
         settings = Settings.from_env(

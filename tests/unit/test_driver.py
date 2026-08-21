@@ -119,7 +119,11 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(result.content, "데드라인 없이도 최종 답변")
 
     def test_generation_retrieval_generation_path(self) -> None:
-        settings = Settings(lunit_fm_api_key="test", max_retrieval_model_rounds=3)
+        settings = Settings(
+            lunit_fm_api_key="test",
+            max_retrieval_model_rounds=3,
+            max_generation_retrievals=1,
+        )
         generation_l2 = ScriptedL2(
             [
                 l2_tool_call(
@@ -180,7 +184,13 @@ class DriverTests(unittest.TestCase):
         self.assertIn("최종 L2 답변", result.content)
 
     def test_guideline_relevant_nodes_auto_transitions_to_page_content(self) -> None:
-        settings = Settings(lunit_fm_api_key="test", max_retrieval_model_rounds=3)
+        # With the MCP budget spent by the auto page read, the deterministic bridge
+        # returns immediately instead of handing control back to the model.
+        settings = Settings(
+            lunit_fm_api_key="test",
+            max_retrieval_model_rounds=3,
+            max_mcp_tool_calls=2,
+        )
         retrieval_l2 = ScriptedL2(
             [
                 l2_tool_call(
@@ -209,6 +219,43 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(mcp.calls[1][1]["doc_id"], "guideline-1")
         self.assertEqual(mcp.calls[1][1]["start_page"], 10)
         self.assertEqual(mcp.calls[1][1]["end_page"], 12)
+
+    def test_bridge_returns_control_to_the_model_while_budget_remains(self) -> None:
+        # The first page the bridge grabs is often only partly on topic, so with budget
+        # left the model must get another turn to verify it, search the gap, or finalize.
+        settings = Settings(
+            lunit_fm_api_key="test",
+            max_retrieval_model_rounds=3,
+            max_mcp_tool_calls=6,
+        )
+        retrieval_l2 = ScriptedL2(
+            [
+                l2_tool_call(
+                    "mcp-call",
+                    "index_get_relevant_nodes",
+                    {"corpus_tag": "guideline", "query": "CKD 혈압 목표"},
+                ),
+                l2_tool_call(
+                    "final-call",
+                    "finalize_retrieval",
+                    {
+                        "status": "sufficient",
+                        "items": [
+                            {"cite_uid": "cite-guideline", "relevance_score": 0.95}
+                        ],
+                        "note": "The retrieved page answers the query.",
+                    },
+                ),
+            ]
+        )
+        mcp = FakeMcp()
+        retrieval = RetrievalEngine(settings, l2=retrieval_l2, mcp=mcp)  # type: ignore[arg-type]
+
+        run = retrieval.run("CKD 혈압 목표 guideline", deadline=Deadline.after(3))
+
+        self.assertEqual(run.outcome.status, "sufficient")
+        self.assertEqual(run.l2_calls, 2)
+        self.assertEqual(run.outcome.evidence[0].cite_uid, "cite-guideline")
 
     def test_high_risk_review_can_request_one_revision(self) -> None:
         settings = Settings(
