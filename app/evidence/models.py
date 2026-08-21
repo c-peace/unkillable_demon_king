@@ -186,8 +186,12 @@ class RetrievalOutcome:
             },
             "evidence": records,
             "instruction": (
-                "Use only these evidence records. Treat partial or no_evidence as unresolved; "
-                "do not fabricate support. cite_uid is provenance, not answer confidence."
+                "These records are the only citable sources: cite nothing else and never "
+                "fabricate support. They supplement your medical knowledge rather than "
+                "limiting it, so when the status is partial or no_evidence, or the records "
+                "do not address the question, answer from established medical knowledge and "
+                "attach no citation to those parts. Do not refuse or describe the retrieval. "
+                "cite_uid is provenance, not answer confidence."
             ),
         }
         serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
