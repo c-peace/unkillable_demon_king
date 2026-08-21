@@ -1,6 +1,9 @@
 # Local agent/runtime state
 .omx/
 
+# Generated PDF inspection artifacts
+/tmp/
+
 # Secrets and local environment
 .env
 .env.*
@@ -16,4 +19,3 @@ __pycache__/
 
 # OS/editor artifacts
 .DS_Store
-
