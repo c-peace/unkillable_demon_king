@@ -121,10 +121,12 @@ class RetrievalProgressionTests(unittest.TestCase):
             deadline=Deadline.after(3),
         )
 
-        self.assertEqual(run.outcome.status, "partial")
+        # The duplicate discovery call is served from cache, so it costs no MCP budget,
+        # and the model keeps working until it can finalize as sufficient.
+        self.assertEqual(run.outcome.status, "sufficient")
         self.assertEqual(run.outcome.evidence[0].cite_uid, "cite-guideline-page")
         self.assertEqual(run.outcome.mcp_calls, 2)
-        self.assertEqual(run.l2_calls, 1)
+        self.assertEqual(run.l2_calls, 4)
         self.assertEqual(
             mcp.calls,
             [

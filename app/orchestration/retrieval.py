@@ -415,10 +415,19 @@ class RetrievalEngine:
         while model_rounds < self._settings.max_retrieval_model_rounds:
             if not deadline.can_start(0.25):
                 break
+            # Keep searching while budget allows, even once citable evidence exists: the
+            # first hit is often only partially on-topic, and retrieval_tools already
+            # carries finalize_retrieval so the model can stop as soon as it judges the
+            # evidence sufficient. Reserve the last round for finalize only.
+            search_budget_left = (
+                not mcp_budget_exhausted
+                and mcp_calls < self._settings.max_mcp_tool_calls
+                and model_rounds < self._settings.max_retrieval_model_rounds - 1
+            )
             round_tools = (
-                [FINALIZE_RETRIEVAL_TOOL]
-                if len(registry)
-                else retrieval_tools
+                retrieval_tools
+                if search_budget_left or not len(registry)
+                else [FINALIZE_RETRIEVAL_TOOL]
             )
             allowed_tool_names = {
                 tool["function"]["name"]
@@ -564,7 +573,12 @@ class RetrievalEngine:
                         tool_content = {
                             "registered_cite_uids": list(cite_uids),
                             "evidence": _registered_evidence_payload(registry, cite_uids),
-                            "instruction": "Call finalize_retrieval with the relevant cite_uids.",
+                            "instruction": (
+                                "Check this evidence against the query. If it covers every "
+                                "evidence requirement, call finalize_retrieval with the relevant "
+                                "cite_uids. If it is off-topic or a requirement is still "
+                                "unmet, search once more for that specific gap."
+                            ),
                         }
                     elif tool.name == "index_get_relevant_nodes":
                         tool_content = {
@@ -617,8 +631,10 @@ class RetrievalEngine:
                                         page_cite_uids,
                                     ),
                                     "instruction": (
-                                        "Citable page evidence is ready. Call finalize_retrieval "
-                                        "with the relevant cite_uids."
+                                        "Citable page evidence is ready. Verify it actually "
+                                        "addresses the query before using it. If it does, call "
+                                        "finalize_retrieval with the relevant cite_uids; if it is "
+                                        "off-topic or incomplete, search for the missing part."
                                     ),
                                 }
                                 page_rendered = _tool_result_content(
@@ -628,7 +644,15 @@ class RetrievalEngine:
                                 tool_cache[page_cache_key] = page_rendered
                                 tool_content.update(page_payload)
                                 tool_content["auto_page_read"] = True
-                                if page_cite_uids:
+                                # The deterministic bridge grabs the first plausible page, which
+                                # may be off-topic. Short-circuit only when no budget remains to
+                                # verify or extend it; otherwise let the model judge sufficiency.
+                                bridge_budget_left = (
+                                    mcp_calls < self._settings.max_mcp_tool_calls
+                                    and model_rounds
+                                    < self._settings.max_retrieval_model_rounds - 1
+                                )
+                                if page_cite_uids and not bridge_budget_left:
                                     return RetrievalRun(
                                         outcome=fallback_selection(
                                             registry=registry,
