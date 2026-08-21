@@ -334,7 +334,7 @@ class DriverTests(unittest.TestCase):
         result = driver.complete(
             ChatCompletionRequest(
                 model=settings.model,
-                messages=({"role": "user", "content": "질문"},),
+                messages=({"role": "user", "content": "이 약의 허가 적응증은?"},),
             ),
             request_id="req-retrieval-failure",
         )
@@ -379,7 +379,7 @@ class DriverTests(unittest.TestCase):
         result = driver.complete(
             ChatCompletionRequest(
                 model=settings.model,
-                messages=({"role": "user", "content": "질문"},),
+                messages=({"role": "user", "content": "이 약의 허가 적응증은?"},),
             ),
             request_id="req-retrieval-budget",
         )

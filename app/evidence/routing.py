@@ -21,7 +21,11 @@ CORE_FALLBACK_TOOL_NAMES: tuple[str, ...] = (
 ROUTING_RULES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (
         re.compile(
-            r"가이드라인|권고|진료지침|guideline|recommendation|target|goal|treat(?:ment)?\s+target",
+            # The English vocabulary was here from the start; the Korean was not, so
+            # "CKD 의 혈압 목표는?" — a question that exists to be answered from a
+            # guideline — reached no domain at all.
+            r"가이드라인|권고|권장|진료지침|목표\s*(치|값|수치)?|기준치|"
+            r"guideline|recommendation|target|goal|treat(?:ment)?\s+target",
             re.IGNORECASE,
         ),
         (
@@ -51,7 +55,8 @@ ROUTING_RULES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     ),
     (
         re.compile(
-            r"약물|의약품|복용|drug|medication|dose|dosage|indication|approval|mfds|허가|적응증",
+            r"약물|의약품|복용|용량|용법|투여량|투여\s*방법|"
+            r"drug|medication|dose|dosage|indication|approval|mfds|허가|적응증",
             re.IGNORECASE,
         ),
         (

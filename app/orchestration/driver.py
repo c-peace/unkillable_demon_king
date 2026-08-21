@@ -10,6 +10,7 @@ from app.clients.l2 import L2Client, parse_tool_arguments
 from app.config import Settings
 from app.contracts import ChatCompletionRequest
 from app.conversation import CompiledConversation, compile_conversation
+from app.admission import admit
 from app.coverage import extract_contract
 from app.deadline import Deadline
 from app.errors import AppError, UpstreamError
@@ -17,7 +18,7 @@ from app.evidence.models import RetrievalOutcome
 from app.orchestration.retrieval import RetrievalEngine
 from app.prompts import (
     GENERATION_AFTER_RETRIEVAL_PROMPT,
-    GENERATION_SYSTEM_PROMPT,
+    generation_system_prompt,
     REVIEW_SYSTEM_PROMPT,
     REVISION_SYSTEM_PROMPT,
 )
@@ -98,8 +99,21 @@ class ConversationDriver:
         # A message that asks three things gets two of them answered unless something holds
         # the list. The model has nowhere to keep it, so the harness does.
         contract = extract_contract(compiled.latest_user_text)
+        # Whether evidence may be acquired at all is decided here, before the generation
+        # request exists. On the memory lane the retrieval tool is simply never offered and
+        # nothing marks that a search was weighed — see app/admission.py for why the model
+        # must not be able to observe the difference.
+        admission = admit(compiled.latest_user_text)
+        retrieval_budget = (
+            self._settings.max_generation_retrievals if admission.admitted else 0
+        )
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": GENERATION_SYSTEM_PROMPT},
+            {
+                "role": "system",
+                "content": generation_system_prompt(
+                    retrieval_offered=admission.admitted
+                ),
+            },
             *compiled.generation_messages(self._settings.conversation_representation),
         ]
         if contract.is_multipart:
@@ -127,7 +141,7 @@ class ConversationDriver:
         for _ in range(max_rounds):
             tools = (
                 [RETRIEVE_RELEVANT_CONTENT_TOOL]
-                if retrieval_count < self._settings.max_generation_retrievals
+                if retrieval_count < retrieval_budget
                 else None
             )
             generation_started = time.monotonic()
@@ -153,7 +167,7 @@ class ConversationDriver:
                         )
                     )
                     continue
-                if retrieval_count >= self._settings.max_generation_retrievals:
+                if retrieval_count >= retrieval_budget:
                     messages.append(
                         _tool_error(
                             call.id,
@@ -218,10 +232,7 @@ class ConversationDriver:
                     {"role": "tool", "tool_call_id": call.id, "content": content}
                 )
 
-            if (
-                retrieval_count >= self._settings.max_generation_retrievals
-                and not retrieval_closed_prompt_added
-            ):
+            if retrieval_count >= retrieval_budget and not retrieval_closed_prompt_added:
                 messages.append(
                     {"role": "system", "content": GENERATION_AFTER_RETRIEVAL_PROMPT}
                 )
@@ -280,6 +291,8 @@ class ConversationDriver:
             "reviewed": reviewed,
             "revised": revised,
             "requirements": len(contract.requirements),
+            "lane_admission": admission.lane,
+            "admission_domains": ",".join(admission.domains),
             "response_chars": len(draft),
             "generation_latency_ms": round(generation_seconds * 1000),
             "retrieval_latency_ms": round(retrieval_seconds * 1000),
