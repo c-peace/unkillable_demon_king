@@ -28,7 +28,7 @@ analysis.
 
 - Git remote `origin` is connected to `https://github.com/c-peace/unkillable_demon_king.git`.
 - The current local branch is `6_00_BestModel` and tracks `origin/6_00_BestModel`.
-- The latest fetched submission branch was `origin/lunit/hackathon-submission` at `def09916b1ce14a82bb5f223de59b3aa8583d0ca` before the fail-soft latency changes; a new submission SHA is still required after verification and publish.
+- The verified semantic-grounding changes were published from `6_00_BestModel` and force-applied with lease protection to `origin/lunit/hackathon-submission` on 2026-08-22. Both remote branch heads are kept identical; read the final 40-character SHA from the remote branch before dashboard submission.
 - `README.md` is the public architecture, requirements, runbook, and implementation-status document.
 - `app/` contains a Python 3.13-compatible, standard-library-only service; root `Dockerfile`, `.dockerignore`, `.env.example`, synthetic tests, smoke test, and Patient Simulator development script now exist.
 - The default runtime has no third-party Python dependencies and starts without downloading packages, models, or data.
