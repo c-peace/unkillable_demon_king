@@ -18,17 +18,17 @@ class SettingsTests(unittest.TestCase):
     def test_defaults_favor_family_routing_and_iterative_retrieval_budgets(self) -> None:
         settings = Settings.from_env({})
         self.assertEqual(settings.mcp_tool_mode, "family")
-        self.assertEqual(settings.l2_timeout_sec, 60.0)
+        self.assertEqual(settings.l2_timeout_sec, 90.0)
         self.assertEqual(settings.l2_retries, 1)
         self.assertEqual(settings.empty_output_retries, 1)
         self.assertEqual(settings.l2_max_tokens, 4_096)
         self.assertEqual(settings.request_timeout_sec, 240.0)
-        self.assertEqual(settings.retrieval_timeout_sec, 120.0)
+        self.assertEqual(settings.retrieval_timeout_sec, 90.0)
         self.assertEqual(settings.max_generation_retrievals, 2)
-        self.assertEqual(settings.max_retrieval_model_rounds, 5)
-        self.assertEqual(settings.max_mcp_tool_calls, 6)
+        self.assertEqual(settings.max_retrieval_model_rounds, 4)
+        self.assertEqual(settings.max_mcp_tool_calls, 4)
         self.assertEqual(settings.max_tool_result_chars, 8_000)
-        self.assertEqual(settings.max_evidence_items, 8)
+        self.assertEqual(settings.max_evidence_items, 6)
         self.assertEqual(settings.max_evidence_chars, 8_000)
 
     def test_request_timeout_zero_disables_global_deadline(self) -> None:
@@ -50,7 +50,7 @@ class SettingsTests(unittest.TestCase):
         )
         self.assertEqual(settings.host, "0.0.0.0")
         self.assertEqual(settings.port, 8000)
-        self.assertEqual(settings.l2_timeout_sec, 60.0)
+        self.assertEqual(settings.l2_timeout_sec, 90.0)
         self.assertEqual(settings.mcp_tool_mode, "family")
 
     def test_invalid_mode_is_rejected(self) -> None:

@@ -73,7 +73,14 @@ ROUTING_RULES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
         ),
     ),
     (
-        re.compile(r"법령|법률|조문|law|statute|regulation", re.IGNORECASE),
+        # "의료법상 ..." style questions name the statute directly and never contain the
+        # words 법령/법률, so match a named act as well as the generic vocabulary.
+        re.compile(
+            r"의료법|약사법|의료기기법|개인정보\s*보호법|국민건강보험법|"
+            r"[가-힣]{2,}법상|법령|법률|조문|시행령|시행규칙|제\s*\d+\s*조|"
+            r"law|statute|regulation",
+            re.IGNORECASE,
+        ),
         (
             "openapi_law_search",
             "openapi_law_list_articles",
