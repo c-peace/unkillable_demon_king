@@ -242,7 +242,12 @@ class ConversationDriver:
 
         reviewed = False
         revised = False
-        if self._should_review(compiled, last_outcome) and deadline.can_start(1.0):
+        # The audit costs one L2 call and the revision a second, so only start it when
+        # enough of the request budget is left for both to finish.
+        review_reserve_sec = 2 * self._settings.l2_timeout_sec
+        if self._should_review(compiled, last_outcome) and deadline.can_start(
+            review_reserve_sec
+        ):
             review_started = time.monotonic()
             draft, review_l2_calls, reviewed, revised, review_usage = self._review(
                 compiled,
@@ -283,11 +288,10 @@ class ConversationDriver:
         compiled: CompiledConversation,
         outcome: RetrievalOutcome | None,
     ) -> bool:
-        if not self._settings.enable_high_risk_review:
-            return False
-        return compiled.is_high_risk or (
-            outcome is not None and outcome.status in {"partial", "no_evidence"}
-        )
+        # Omissions are what a medical answer loses most to, and they are not confined to
+        # high-risk turns or to turns where retrieval came back thin, so audit every draft
+        # the time budget allows rather than only those two lanes.
+        return self._settings.enable_high_risk_review
 
     def _review(
         self,
