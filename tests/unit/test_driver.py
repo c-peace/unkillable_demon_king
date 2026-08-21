@@ -6,6 +6,7 @@ from app.clients.mcp import McpTool
 from app.config import Settings
 from app.contracts import ChatCompletionRequest
 from app.deadline import Deadline
+from app.errors import UpstreamError
 from app.orchestration.driver import ConversationDriver
 from app.orchestration.retrieval import RetrievalEngine
 from tests.fakes import NeverRetrieval, ScriptedL2, l2_content, l2_tool_call
@@ -63,6 +64,19 @@ class DriverTests(unittest.TestCase):
         sent = l2.calls[0]["messages"]
         self.assertEqual([message["role"] for message in sent[-3:]], ["user", "assistant", "user"])
         self.assertEqual(result.trace["lane"], "DIRECT")
+
+    def test_direct_answer_succeeds_without_global_request_deadline(self) -> None:
+        settings = Settings(lunit_fm_api_key="test", request_timeout_sec=None)  # type: ignore[arg-type]
+        l2 = ScriptedL2([l2_content("데드라인 없이도 최종 답변")])
+        driver = ConversationDriver(settings, l2=l2, retrieval=NeverRetrieval())  # type: ignore[arg-type]
+        result = driver.complete(
+            ChatCompletionRequest(
+                model=settings.model,
+                messages=({"role": "user", "content": "설명해줘"},),
+            ),
+            request_id="req-no-deadline",
+        )
+        self.assertEqual(result.content, "데드라인 없이도 최종 답변")
 
     def test_generation_retrieval_generation_path(self) -> None:
         settings = Settings(lunit_fm_api_key="test", max_retrieval_model_rounds=3)
@@ -163,6 +177,39 @@ class DriverTests(unittest.TestCase):
         )
         self.assertEqual(run.outcome.status, "partial")
         self.assertEqual(run.outcome.evidence[0].cite_uid, "cite-guideline")
+
+    def test_retrieval_failure_still_returns_final_l2_answer(self) -> None:
+        settings = Settings(lunit_fm_api_key="test")
+        generation_l2 = ScriptedL2(
+            [
+                l2_tool_call(
+                    "gen-call",
+                    "retrieve_relevant_content",
+                    {"query": "근거가 필요한 질문"},
+                ),
+                l2_content("근거가 제한적이지만 안전 중심으로 답변합니다."),
+            ]
+        )
+
+        class FailingRetrieval:
+            def run(self, query: str, *, deadline):
+                raise UpstreamError("retrieval failed", code="mcp_request_failed")
+
+        driver = ConversationDriver(
+            settings,
+            l2=generation_l2,
+            retrieval=FailingRetrieval(),  # type: ignore[arg-type]
+        )
+        result = driver.complete(
+            ChatCompletionRequest(
+                model=settings.model,
+                messages=({"role": "user", "content": "질문"},),
+            ),
+            request_id="req-retrieval-failure",
+        )
+        self.assertEqual(result.content, "근거가 제한적이지만 안전 중심으로 답변합니다.")
+        tool_message = generation_l2.calls[1]["messages"][-1]
+        self.assertIn('"status": "no_evidence"', tool_message["content"])
 
 
 if __name__ == "__main__":
