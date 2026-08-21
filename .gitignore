@@ -1,0 +1,19 @@
+# Local agent/runtime state
+.omx/
+
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+.venv/
+
+# Python caches and test artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS/editor artifacts
+.DS_Store
+
