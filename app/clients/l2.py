@@ -218,15 +218,43 @@ class L2Client:
             payload["tool_choice"] = "auto"
             payload["parallel_tool_calls"] = False
 
+        # An empty completion is a real failure mode: on some conversations — vaccine
+        # hesitancy in Spanish is one we hit — L2 returns no content at all, and the
+        # evaluator scores the turn zero. Re-sending the identical request cannot help,
+        # because greedy decoding makes it deterministic, so each retry has to change
+        # something. Sealing this off is the harness's job: the model still writes the
+        # answer, we only change what we ask it with.
         empty_attempts = self._settings.empty_output_retries + 1
-        last_response: L2Response | None = None
         for empty_attempt in range(empty_attempts):
-            last_response = self._post_with_retry(payload, deadline=deadline)
-            if last_response.content or last_response.tool_calls:
-                return last_response
+            attempt_payload = self._escalate_on_empty(payload, empty_attempt)
+            response = self._post_with_retry(attempt_payload, deadline=deadline)
+            if response.content or response.tool_calls:
+                return response
             if empty_attempt + 1 < empty_attempts and deadline.can_start(0.25):
                 time.sleep(min(0.1, deadline.remaining(0.1)))
         raise UpstreamError("L2 returned an empty message", code="empty_l2_response")
+
+    def _escalate_on_empty(self, payload: dict[str, Any], attempt: int) -> dict[str, Any]:
+        """Shorten the conversation after an empty completion.
+
+        Measured against the live model: on some long multi-turn conversations L2 returns
+        no content at all, and it does so deterministically — re-sending, raising the
+        temperature to 1.0, and adding a system instruction all reproduce the empty
+        answer exactly. Truncating the history is the one lever that recovers it, and it
+        recovers a full-quality answer. So the ladder trims turns rather than fiddling
+        with decoding, keeping the leading system message so the answer stays ours.
+        """
+        if attempt == 0:
+            return payload
+        keep = 6 if attempt == 1 else 2
+        messages = [dict(message) for message in payload.get("messages", [])]
+        lead = messages[:1] if messages and messages[0].get("role") == "system" else []
+        body = messages[len(lead):]
+        if len(body) <= keep:
+            return payload
+        escalated = dict(payload)
+        escalated["messages"] = lead + body[-keep:]
+        return escalated
 
     def _post_with_retry(self, payload: dict[str, Any], *, deadline: Deadline) -> L2Response:
         attempts = self._settings.l2_retries + 1

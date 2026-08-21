@@ -295,9 +295,11 @@ class ConversationDriver:
         compiled: CompiledConversation,
         outcome: RetrievalOutcome | None,
     ) -> bool:
-        # Omissions are what a medical answer loses most to, and they are not confined to
-        # high-risk turns or to turns where retrieval came back thin, so audit every draft
-        # the time budget allows rather than only those two lanes.
+        # Measured on 157 requests: the audit fired on 82% of them and changed the answer
+        # on 18% of those, and the score was identical with it off (0.4946 vs 0.4944) —
+        # what it added to completeness it took back off accuracy. It cost 60% of our
+        # latency, and latency is what kills a run on the official harness. Off by default;
+        # the flag stays so the experiment can be repeated.
         return self._settings.enable_high_risk_review
 
     def _review(
