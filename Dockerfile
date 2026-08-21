@@ -7,6 +7,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+COPY .env ./submission.env
 COPY app/ ./app/
 
 RUN python -m compileall -q app

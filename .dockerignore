@@ -2,7 +2,6 @@
 .gitignore
 .agents
 .omx
-.env
 .env.*
 !.env.example
 .venv
