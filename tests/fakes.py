@@ -11,11 +11,12 @@ class ScriptedL2:
         self.responses = deque(responses)
         self.calls: list[dict[str, Any]] = []
 
-    def complete(self, messages, *, deadline, tools=None):
+    def complete(self, messages, *, deadline, tools=None, tool_choice=None):
         self.calls.append(
             {
                 "messages": [dict(message) for message in messages],
                 "tools": list(tools) if tools else [],
+                "tool_choice": tool_choice,
             }
         )
         if not self.responses:
