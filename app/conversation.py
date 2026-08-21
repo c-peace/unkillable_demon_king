@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Iterable
 
+from app.clinical_state import ClinicalState, compile_clinical_state
 from app.coverage import AnswerContract, extract_contract
 
 
@@ -46,10 +47,13 @@ NEGATION_PATTERN = re.compile(
 )
 
 FORMAT_PATTERN = re.compile(
-    r"rewrite|reword|shorten|summari[sz]e|translate|draft|message|email|letter|note|"
-    r"soap|bullet|table|template|"
-    r"번역|요약|정리|다듬|수정|다시 써|문구|메시지|문자|편지|노트|"
-    r"(?:^|[\s(])표(?:[\s)!?,.]|$)",
+    r"\b(?:rewrite|reword|shorten|summari[sz]e|translate)\b|"
+    r"\b(?:draft|write|create|prepare)\s+(?:a\s+|an\s+|the\s+|this\s+)?"
+    r"(?:message|email|letter|note|soap note|template)\b|"
+    r"\b(?:turn|convert|format)\b.{0,40}\b(?:into|as)\b|"
+    r"(?:다음|아래|이)\s*(?:문장|문구|내용|글|메시지)?.{0,20}"
+    r"(?:번역|요약|정리|다듬|수정|다시\s*써)|"
+    r"(?:메시지|문자|편지|노트|SOAP)\s*(?:로|를|으로)?.{0,12}(?:써|작성|만들)",
     re.IGNORECASE,
 )
 
@@ -69,7 +73,6 @@ AGE_PATTERN = re.compile(
 WEIGHT_PATTERN = re.compile(r"\b\d{1,3}(?:\.\d+)?\s*(?:kg|킬로)\b", re.IGNORECASE)
 TEMPERATURE_PATTERN = re.compile(r"\b\d{2}(?:\.\d+)?\s*(?:c|℃|도)\b", re.IGNORECASE)
 DOSE_PATTERN = re.compile(r"\b\d+(?:\.\d+)?\s*(?:mg|mcg|g|ml|정|캡슐)\b", re.IGNORECASE)
-DRUG_FORM_PATTERN = re.compile(r"[가-힣]{2,}(?:정|캡슐|시럽|주사)", re.IGNORECASE)
 CHILD_PATTERN = re.compile(r"소아|영아|신생아|아이|아기|child|kid|infant|newborn|pediatric", re.IGNORECASE)
 FEVER_PATTERN = re.compile(r"열|fever|febrile", re.IGNORECASE)
 DOSING_PATTERN = re.compile(r"용량|복용량|dose|dosage|몇 mg|얼마나", re.IGNORECASE)
@@ -82,64 +85,6 @@ NEGATED_RISK_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-MEDICATION_CANDIDATE_PATTERNS = (
-    re.compile(
-        r"([A-Za-z][A-Za-z0-9-]{2,}|[가-힣]{2,})\s*(?:의\s*)?"
-        r"(?:\d+(?:\.\d+)?\s*(?:mg|mcg|g|ml|정|캡슐)|dose|dosage|용량|복용량)",
-        re.IGNORECASE,
-    ),
-    re.compile(r"(?:dose|dosage)\s+(?:of|for)\s+([A-Za-z][A-Za-z0-9-]{2,})", re.IGNORECASE),
-    re.compile(
-        r"(?:take|taking|use|using|prescribed|on)\s+(?:a|an|the|my\s+)?"
-        r"([A-Za-z][A-Za-z0-9-]{2,})",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"([A-Za-z][A-Za-z0-9-]{2,}|[가-힣]{2,})(?:을|를)?\s*"
-        r"(?:복용|먹고|먹는|투여|사용)"
-    ),
-)
-
-_GENERIC_MEDICATION_WORDS = frozenset(
-    {
-        "what",
-        "which",
-        "this",
-        "that",
-        "medicine",
-        "medication",
-        "drug",
-        "dose",
-        "dosage",
-        "safe",
-        "recommended",
-        "daily",
-        "usual",
-        "normal",
-        "maximum",
-        "minimum",
-        "appropriate",
-        "correct",
-        "standard",
-        "약",
-        "약물",
-        "의약품",
-        "적절한",
-        "권장",
-        "안전한",
-        "정확한",
-        "용량",
-        "복용량",
-        "하루",
-        "일일",
-        "최대",
-        "최소",
-        "적정",
-        "일반적인",
-    }
-)
-
-
 def _risk_is_explicitly_negated(text: str) -> bool:
     if not NEGATION_PATTERN.search(text):
         return False
@@ -149,18 +94,6 @@ def _risk_is_explicitly_negated(text: str) -> bool:
 def _has_active_risk(text: str) -> bool:
     remaining = NEGATED_RISK_PATTERN.sub("", text)
     return bool(HIGH_RISK_PATTERN.search(remaining))
-
-
-def _has_named_medication(turns: Iterable[str]) -> bool:
-    text = "\n".join(turns)
-    if DRUG_FORM_PATTERN.search(text):
-        return True
-    for pattern in MEDICATION_CANDIDATE_PATTERNS:
-        for match in pattern.finditer(text):
-            candidate = match.group(1).strip().lower()
-            if candidate not in _GENERIC_MEDICATION_WORDS:
-                return True
-    return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,6 +112,7 @@ class ConversationState:
     unresolved_references: tuple[str, ...]
     decision_critical_missing_facts: tuple[str, ...]
     answer_contract: AnswerContract
+    clinical: ClinicalState
 
     @property
     def has_follow_up_reference(self) -> bool:
@@ -186,12 +120,14 @@ class ConversationState:
 
     @property
     def is_text_operation(self) -> bool:
-        return self.requested_format != "plain_answer"
+        return self.requested_format == "text_operation"
 
     def retrieval_context(self) -> str:
         if not self.has_follow_up_reference or not self.prior_user_turns:
             return self.latest_user_turn
-        prior = "\n".join(self.prior_user_turns[-2:])
+        # The raw request remains authoritative. Keep enough user turns to resolve a
+        # medication or condition introduced before short acknowledgement turns.
+        prior = "\n".join(self.prior_user_turns[-8:])
         return f"{prior}\n{self.latest_user_turn}".strip()
 
 
@@ -224,6 +160,7 @@ class CompiledConversation:
         requirements: tuple[str, ...],
         lead_system_messages: Iterable[dict[str, Any]],
         grounding_payloads: Iterable[str] = (),
+        plan_record: dict[str, Any] | None = None,
         recent_turns: int = 4,
     ) -> list[dict[str, Any]]:
         lead = [dict(message) for message in lead_system_messages]
@@ -239,12 +176,16 @@ class CompiledConversation:
             "corrections_and_negations": list(self.state.corrections),
             "unresolved_references": list(self.state.unresolved_references),
             "answer_requirements": list(requirements),
+            "clinical_state": self.state.clinical.compact_record(),
+            "response_plan": dict(plan_record or {}),
             "grounding_payloads": grounding,
             "recent_turns": recent_packet,
             "instruction": (
                 "This is a compact recovery packet for the same conversation. Preserve "
                 "the safety facts, corrections, negations, unanswered user asks, and all "
-                "grounding payloads. Cite only evidence present in grounding_payloads."
+                "grounding payloads. Follow response_plan and cite only evidence present "
+                "in grounding_payloads. The raw recent turns remain authoritative if a "
+                "derived clinical-state field conflicts with them."
             ),
         }
         return [
@@ -267,7 +208,11 @@ def _requested_language(text: str) -> str:
 
 
 def _requested_format(text: str) -> str:
-    return "text_operation" if FORMAT_PATTERN.search(text) else "plain_answer"
+    if FORMAT_PATTERN.search(text):
+        return "text_operation"
+    if STRICT_FORMAT_PATTERN.search(text):
+        return "structured_output"
+    return "plain_answer"
 
 
 def _current_intent(text: str) -> str:
@@ -293,6 +238,13 @@ def _extract_state(copied: tuple[dict[str, Any], ...], latest_user: str) -> Conv
         if message.get("role") == "user" and _message_text(message).strip()
     )
     prior_user_turns = user_turns[:-1]
+    requested_language = _requested_language(latest_user)
+    requested_format = _requested_format(latest_user)
+    clinical = compile_clinical_state(
+        copied,
+        language=requested_language,
+        requested_format=requested_format,
+    )
     unresolved_references = ()
     explicit_follow_up = bool(latest_user and FOLLOW_UP_REFERENCE_PATTERN.search(latest_user))
     elliptical_follow_up = bool(
@@ -301,7 +253,12 @@ def _extract_state(copied: tuple[dict[str, Any], ...], latest_user: str) -> Conv
         and QUESTION_PATTERN.search(latest_user)
         and ELLIPTICAL_FOLLOW_UP_PATTERN.search(latest_user)
     )
-    if explicit_follow_up or elliptical_follow_up:
+    local_reference_anchor = bool(
+        clinical.named_medications or clinical.symptoms or clinical.facts
+    )
+    if elliptical_follow_up or (
+        explicit_follow_up and (prior_user_turns or not local_reference_anchor)
+    ):
         unresolved_references = (latest_user,)
 
     corrections = _unique(
@@ -322,23 +279,32 @@ def _extract_state(copied: tuple[dict[str, Any], ...], latest_user: str) -> Conv
             or NEGATION_PATTERN.search(text)
         )
     )
-    latest_active_risk = (
-        _has_active_risk(latest_user)
-        and not FORMAT_PATTERN.search(latest_user)
+    clinician_general_education = bool(
+        clinical.interaction.user_role == "clinician"
+        and re.search(r"general (?:information|overview)|일반적인? (?:정보|개요)|교육", latest_user, re.I)
+    )
+    latest_active_risk = bool(
+        (
+            _has_active_risk(latest_user)
+            or clinical.hard_risk_signals
+        )
+        and requested_format != "text_operation"
+        and not clinician_general_education
     )
     prior_active_risk = bool(
         unresolved_references
-        and not FORMAT_PATTERN.search(latest_user)
+        and requested_format != "text_operation"
         and not _risk_is_explicitly_negated(latest_user)
         and any(_has_active_risk(text) for text in prior_user_turns[-2:])
     )
     active_risk_signals = _unique(
-        (
+        (*clinical.hard_risk_signals,
             "high_risk_latest",
             "follow_up_reference",
         )[index]
         for index, condition in enumerate(
             (
+                *(True for _ in clinical.hard_risk_signals),
                 latest_active_risk,
                 prior_active_risk,
             )
@@ -371,7 +337,7 @@ def _extract_state(copied: tuple[dict[str, Any], ...], latest_user: str) -> Conv
     missing_facts: list[str] = []
     if unresolved_references and not prior_user_turns:
         missing_facts.append("reference_target")
-    if DOSING_PATTERN.search(latest_user) and not _has_named_medication(user_turns):
+    if DOSING_PATTERN.search(latest_user) and not clinical.named_medications:
         missing_facts.append("medication_name")
     if CHILD_PATTERN.search(latest_user) and FEVER_PATTERN.search(latest_user):
         if not AGE_PATTERN.search("\n".join(user_turns)):
@@ -385,8 +351,8 @@ def _extract_state(copied: tuple[dict[str, Any], ...], latest_user: str) -> Conv
         latest_user_turn=latest_user,
         prior_user_turns=prior_user_turns,
         current_intent=_current_intent(latest_user),
-        requested_language=_requested_language(latest_user),
-        requested_format=_requested_format(latest_user),
+        requested_language=requested_language,
+        requested_format=requested_format,
         strict_output_requested=bool(STRICT_FORMAT_PATTERN.search(latest_user)),
         explicit_requirements=contract.requirements,
         source_sensitive_signals=source_sensitive_signals,
@@ -396,6 +362,7 @@ def _extract_state(copied: tuple[dict[str, Any], ...], latest_user: str) -> Conv
         unresolved_references=unresolved_references,
         decision_critical_missing_facts=tuple(missing_facts),
         answer_contract=contract,
+        clinical=clinical,
     )
 
 

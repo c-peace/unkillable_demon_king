@@ -16,6 +16,8 @@ from app.coverage import extract_contract
 from app.deadline import Deadline
 from app.errors import AppError, UpstreamError
 from app.evidence.models import EvidenceRequirement, RetrievalOutcome
+from app.evidence.session import RetrievalSession
+from app.evidence.verification import EvidenceVerifier
 from app.orchestration.planning import (
     RESPONSE_ANSWER_WITH_QUESTION,
     HarnessPlan,
@@ -23,8 +25,9 @@ from app.orchestration.planning import (
 )
 from app.orchestration.retrieval import RetrievalEngine
 from app.orchestration.review import ConditionalReviewer, ReviewReason
+from app.orchestration.state_enrichment import ClinicalStateEnricher
 from app.observability import set_request_id
-from app.prompts import GENERATION_AFTER_RETRIEVAL_PROMPT, generation_system_prompt
+from app.prompts import generation_after_retrieval_prompt, generation_system_prompt
 
 
 LOGGER = logging.getLogger("lunit_driver")
@@ -138,14 +141,26 @@ def _retrieval_requirements(
         if criticality not in {"critical", "supporting"}:
             criticality = "critical"
         preferred_domain = raw.get("preferred_domain")
+        planned_fallback = planned[min(index - 1, len(planned) - 1)] if planned else None
         requirements.append(
             EvidenceRequirement(
                 id=identifier[:80],
                 claim_or_question=claim[:1_000],
                 source_preference=(
                     preferred_domain.strip()[:80]
-                    if isinstance(preferred_domain, str)
+                    if isinstance(preferred_domain, str) and preferred_domain.strip()
+                    else planned_fallback.source_preference
+                    if planned_fallback is not None
                     else ""
+                ),
+                clinical_constraints=(
+                    planned_fallback.clinical_constraints if planned_fallback is not None else ""
+                ),
+                jurisdiction=(
+                    planned_fallback.jurisdiction if planned_fallback is not None else ""
+                ),
+                time_sensitive=(
+                    planned_fallback.time_sensitive if planned_fallback is not None else False
                 ),
                 criticality=criticality,
             )
@@ -228,6 +243,8 @@ class ConversationDriver:
         self._l2 = l2
         self._retrieval = retrieval
         self._reviewer = ConditionalReviewer(l2)
+        self._evidence_verifier = EvidenceVerifier(settings, l2)
+        self._state_enricher = ClinicalStateEnricher(l2)
 
     def _complete_l2(
         self,
@@ -254,14 +271,17 @@ class ConversationDriver:
         *,
         deadline: Deadline,
         requirements: tuple[EvidenceRequirement, ...],
+        session: RetrievalSession | None = None,
     ) -> Any:
         parameters = inspect.signature(self._retrieval.run).parameters
         if "requirements" in parameters:
-            return self._retrieval.run(
-                query,
-                deadline=deadline,
-                requirements=requirements,
-            )
+            kwargs: dict[str, Any] = {
+                "deadline": deadline,
+                "requirements": requirements,
+            }
+            if session is not None and "session" in parameters:
+                kwargs["session"] = session
+            return self._retrieval.run(query, **kwargs)
         return self._retrieval.run(query, deadline=deadline)
 
     def complete(
@@ -278,8 +298,51 @@ class ConversationDriver:
             else Deadline.after(self._settings.request_timeout_sec)
         )
         compiled = compile_conversation(request.messages)
+        state_enrichment_calls = 0
+        state_enrichment_usage: dict[str, int] = {}
+        state_enrichment_status = "not_requested"
+        if (
+            getattr(self._settings, "clinical_state_policy", "structured") == "hybrid"
+            and isinstance(self._l2, L2Client)
+            and compiled.state.clinical.needs_semantic_enrichment
+            and deadline.can_start(1.0)
+        ):
+            enrichment = self._state_enricher.run(
+                compiled.state.clinical,
+                case_packet=compiled.case_packet,
+                turn_roles=tuple(str(message.get("role", "unknown")) for message in compiled.messages),
+                deadline=deadline.with_timeout_cap(min(self._settings.l2_timeout_sec, 30.0)),
+            )
+            state_enrichment_calls = enrichment.l2_calls
+            state_enrichment_usage = enrichment.usage
+            state_enrichment_status = enrichment.status
+            if enrichment.state is not compiled.state.clinical:
+                enriched_signals = tuple(
+                    dict.fromkeys(
+                        (*compiled.state.active_risk_signals, *enrichment.state.hard_risk_signals)
+                    )
+                )
+                enriched_state = replace(
+                    compiled.state,
+                    clinical=enrichment.state,
+                    active_risk_signals=enriched_signals,
+                )
+                compiled = replace(
+                    compiled,
+                    state=enriched_state,
+                    is_high_risk=bool(enriched_signals),
+                )
         contract = extract_contract(compiled.latest_user_text)
         plan = build_plan(self._settings, compiled, contract)
+        retrieval_session = (
+            # Seed on the first validated bridge call. A generation model may refine one
+            # coarse planned requirement into several atomic ones; pre-seeding both shapes
+            # would leave duplicate critical requirements in the cumulative ledger.
+            RetrievalSession.create()
+            if getattr(self._settings, "retrieval_session_policy", "cumulative")
+            == "cumulative"
+            else None
+        )
         retrieval_budget = (
             self._settings.max_generation_retrievals if plan.retrieval_allowed else 0
         )
@@ -290,7 +353,12 @@ class ConversationDriver:
             {
                 "role": "system",
                 "content": generation_system_prompt(
-                    retrieval_offered=plan.retrieval_allowed
+                    retrieval_offered=plan.retrieval_allowed,
+                    contract=(
+                        plan.contract_spec
+                        if getattr(self._settings, "response_contract_policy", "typed") == "typed"
+                        else None
+                    ),
                 ),
             },
             *compiled.generation_messages(self._settings.conversation_representation),
@@ -307,10 +375,19 @@ class ConversationDriver:
                 requirements=contract.requirements,
                 lead_system_messages=system_messages,
                 grounding_payloads=grounding_payloads,
+                plan_record={
+                    "lane": plan.lane,
+                    "clinical_risk": plan.clinical_risk.value,
+                    "task_kind": plan.task_kind.value,
+                    "interaction_mode": plan.interaction_mode.value,
+                    "contract_kind": plan.contract_kind.value,
+                    "missing_facts": [item.id for item in plan.missing_facts],
+                    "clarification_reason": plan.clarification_reason,
+                },
             )
 
-        usage: dict[str, int] = {}
-        l2_calls = 0
+        usage: dict[str, int] = dict(state_enrichment_usage)
+        l2_calls = state_enrichment_calls
         retrieval_count = 0
         retrieval_l2_calls = 0
         mcp_calls = 0
@@ -322,12 +399,22 @@ class ConversationDriver:
         retrieval_seconds = 0.0
         review_seconds = 0.0
         retrieval_diagnostics: dict[str, Any] = {}
+        verification_l2_calls = 0
+        verification_state = "not_used"
+        verification_issues: tuple[str, ...] = ()
         history_compacted = False
 
         if self._settings.max_generation_retrievals == 0:
             messages.insert(
                 1,
-                {"role": "system", "content": GENERATION_AFTER_RETRIEVAL_PROMPT},
+                {
+                    "role": "system",
+                    "content": generation_after_retrieval_prompt(
+                        plan.contract_spec
+                        if getattr(self._settings, "response_contract_policy", "typed") == "typed"
+                        else None
+                    ),
+                },
             )
             retrieval_closed_prompt_added = True
 
@@ -428,13 +515,45 @@ class ConversationDriver:
                         query.strip(),
                         deadline=retrieval_deadline,
                         requirements=requirements,
+                        session=retrieval_session,
                     )
-                    last_outcome = run.outcome
-                    retrieval_diagnostics = dict(run.diagnostics or {})
+                    verification = self._evidence_verifier.run(
+                        run.outcome,
+                        clinical_risk=plan.clinical_risk.value,
+                        deadline=deadline,
+                        allow_semantic=(
+                            isinstance(self._l2, L2Client)
+                            and (
+                                run.outcome.status == "sufficient"
+                                or retrieval_count >= retrieval_budget
+                            )
+                        ),
+                    )
+                    verified_outcome = verification.outcome
+                    verification_l2_calls += verification.l2_calls
+                    l2_calls += verification.l2_calls
+                    _sum_usage(usage, verification.usage)
+                    verification_state = verification.state
+                    verification_issues = tuple(
+                        dict.fromkeys((*verification_issues, *verification.issues))
+                    )
+                    if retrieval_session is not None:
+                        retrieval_session.apply_outcome(
+                            verified_outcome,
+                            diagnostics=dict(run.diagnostics or {}),
+                        )
+                        last_outcome = retrieval_session.snapshot(note=verified_outcome.note)
+                        retrieval_diagnostics = retrieval_session.diagnostics()
+                    else:
+                        last_outcome = verified_outcome
+                        retrieval_diagnostics = dict(run.diagnostics or {})
                     retrieval_l2_calls += run.l2_calls
                     mcp_calls += run.outcome.mcp_calls
                     _sum_usage(usage, run.usage)
-                    content = run.outcome.to_generation_payload(
+                    # Generation must see the same verified cumulative ledger used by
+                    # review and observability. Passing the raw per-run outcome here can
+                    # forget earlier support or expose evidence rejected by verification.
+                    content = last_outcome.to_generation_payload(
                         max_chars=self._settings.max_evidence_chars
                     )
                 except AppError as exc:
@@ -445,7 +564,16 @@ class ConversationDriver:
                             "retrieval_error": exc.code,
                         },
                     )
-                    last_outcome = _unresolved_retrieval_outcome(requirements)
+                    failed_outcome = _unresolved_retrieval_outcome(requirements)
+                    if retrieval_session is not None:
+                        retrieval_session.apply_outcome(
+                            failed_outcome,
+                            diagnostics={"stop_reason": "retrieval_failure"},
+                        )
+                        last_outcome = retrieval_session.snapshot(note=failed_outcome.note)
+                        retrieval_diagnostics = retrieval_session.diagnostics()
+                    else:
+                        last_outcome = failed_outcome
                     content = last_outcome.to_generation_payload(
                         max_chars=self._settings.max_evidence_chars
                     )
@@ -466,14 +594,28 @@ class ConversationDriver:
                 and not retrieval_closed_prompt_added
             ):
                 messages.append(
-                    {"role": "system", "content": GENERATION_AFTER_RETRIEVAL_PROMPT}
+                    {
+                        "role": "system",
+                        "content": generation_after_retrieval_prompt(
+                            plan.contract_spec
+                            if getattr(self._settings, "response_contract_policy", "typed") == "typed"
+                            else None
+                        ),
+                    }
                 )
                 retrieval_closed_prompt_added = True
 
         if not draft:
             if not retrieval_closed_prompt_added:
                 messages.append(
-                    {"role": "system", "content": GENERATION_AFTER_RETRIEVAL_PROMPT}
+                    {
+                        "role": "system",
+                        "content": generation_after_retrieval_prompt(
+                            plan.contract_spec
+                            if getattr(self._settings, "response_contract_policy", "typed") == "typed"
+                            else None
+                        ),
+                    }
                 )
             generation_started = time.monotonic()
             response = self._complete_l2(
@@ -510,6 +652,12 @@ class ConversationDriver:
                 for requirement in critical
             ):
                 review_reasons.append(ReviewReason.PARTIAL_CRITICAL_EVIDENCE.value)
+        if any(
+            marker in issue
+            for issue in verification_issues
+            for marker in ("mismatch", "date_unknown", "inapplicable", "insufficient")
+        ):
+            review_reasons.append(ReviewReason.UNCERTAIN_APPLICABILITY.value)
 
         review_reasons = list(dict.fromkeys(review_reasons))
         if self._settings.review_policy == "off":
@@ -541,6 +689,11 @@ class ConversationDriver:
                 evidence,
                 review_reasons,
                 deadline=deadline,
+                contract=(
+                    plan.contract_spec
+                    if getattr(self._settings, "response_contract_policy", "typed") == "typed"
+                    else None
+                ),
             )
             draft = review_run.draft
             l2_calls += review_run.l2_calls
@@ -561,7 +714,23 @@ class ConversationDriver:
             "lane_reasons": ",".join(plan.lane_reasons),
             "representation": self._settings.conversation_representation,
             "planner_policy": self._settings.planner_policy,
+            "clinical_state_policy": getattr(
+                self._settings, "clinical_state_policy", "legacy"
+            ),
+            "admission_policy": getattr(self._settings, "admission_policy", "legacy"),
+            "task_kind": plan.task_kind.value,
+            "contract_kind": plan.contract_kind.value,
+            "clinical_risk": plan.clinical_risk.value,
+            "interaction_mode": plan.interaction_mode.value,
+            "clinical_fact_count": len(compiled.state.clinical.facts),
+            "clinical_symptom_count": len(compiled.state.clinical.symptoms),
+            "clinical_medication_count": len(compiled.state.clinical.medications),
+            "state_enrichment_status": state_enrichment_status,
+            "state_enrichment_l2_calls": state_enrichment_calls,
             "retrieval_ledger_policy": self._settings.retrieval_ledger_policy,
+            "retrieval_session_policy": getattr(
+                self._settings, "retrieval_session_policy", "legacy"
+            ),
             "l2_calls": l2_calls,
             "retrieval_l2_calls": retrieval_l2_calls,
             "retrievals": retrieval_count,
@@ -579,6 +748,12 @@ class ConversationDriver:
             "requirements_contradicted": counts["contradicted"],
             "requirements_unresolved": counts["missing"] + counts["unresolved"],
             "evidence_count": len(last_outcome.evidence) if last_outcome else 0,
+            "verification_policy": getattr(
+                self._settings, "evidence_verification_policy", "structural"
+            ),
+            "verification_state": verification_state,
+            "verification_l2_calls": verification_l2_calls,
+            "verification_issue_count": len(verification_issues),
             "review_reasons": ",".join(review_reasons),
             "review_state": review_state,
             "reviewed": reviewed,

@@ -20,6 +20,7 @@ from app.evidence.models import (
     parse_final_selection,
 )
 from app.evidence.routing import SourceRouter
+from app.evidence.session import RetrievalSession
 from app.prompts import RETRIEVAL_SYSTEM_PROMPT
 
 
@@ -215,14 +216,7 @@ def _is_near_duplicate(
 
 
 def _semantic_call_key(name: str, arguments: Mapping[str, Any]) -> str:
-    """Collapse a tool call to what it is actually asking for.
-
-    The model rewords the same search rather than moving on — "warfarin ibuprofen
-    interaction", "ibuprofen interaction with warfarin", "warfarin and ibuprofen adverse
-    interaction" are one search, and running all three costs the budget that a genuinely
-    different search needed. Lowercasing, dropping punctuation and stopwords, and sorting
-    the remaining tokens makes those three collapse to the same key.
-    """
+    """Normalize rewordings for diagnostics and regression coverage."""
     parts: list[str] = []
     for key in sorted(arguments):
         value = arguments[key]
@@ -499,10 +493,40 @@ class RetrievalEngine:
         *,
         deadline: Deadline,
         requirements: tuple[EvidenceRequirement, ...] | None = None,
+        session: RetrievalSession | None = None,
     ) -> RetrievalRun:
-        registry = EvidenceRegistry()
+        registry = session.registry if session is not None else EvidenceRegistry()
         usage: dict[str, int] = {}
-        ledger = default_requirement_ledger(query, requirements=requirements)
+        if session is not None:
+            target_requirements = session.target_requirements(requirements or ())
+            ledger = default_requirement_ledger(query, requirements=target_requirements)
+        else:
+            ledger = default_requirement_ledger(query, requirements=requirements)
+        prior_model_rounds = session.cumulative_model_rounds if session is not None else 0
+        prior_mcp_calls = session.cumulative_mcp_calls if session is not None else 0
+        available_model_rounds = max(
+            0,
+            self._settings.max_retrieval_model_rounds - prior_model_rounds,
+        )
+        available_mcp_calls = max(
+            0,
+            self._settings.max_mcp_tool_calls - prior_mcp_calls,
+        )
+        if available_model_rounds == 0:
+            return RetrievalRun(
+                outcome=fallback_selection(
+                    registry=registry,
+                    query=query,
+                    requirements=ledger.requirements,
+                    note="The cumulative retrieval model-round budget was exhausted.",
+                    model_rounds=0,
+                    mcp_calls=0,
+                    max_items=self._settings.max_evidence_items,
+                ),
+                usage=usage,
+                l2_calls=0,
+                diagnostics={"stop_reason": "model_budget_exhausted"},
+            )
         if not self._settings.enable_mcp:
             return RetrievalRun(
                 outcome=fallback_selection(
@@ -534,9 +558,21 @@ class RetrievalEngine:
                 usage=usage,
                 l2_calls=0,
             )
+        preferred_domains = tuple(
+            dict.fromkeys(
+                requirement.source_preference
+                for requirement in ledger.requirements
+                if requirement.source_preference
+            )
+        )
+        routed_tools = self._router.select_for_domains(
+            preferred_domains,
+            discovered,
+            fallback_query=query,
+        )
         selected_tools = tuple(
             tool
-            for tool in self._router.select(query, discovered)
+            for tool in routed_tools
             if VALID_TOOL_NAME.fullmatch(tool.name)
         )
         LOGGER.info(
@@ -555,8 +591,8 @@ class RetrievalEngine:
                 "role": "user",
                 "content": _retrieval_user_message(
                     query,
-                    max_model_rounds=self._settings.max_retrieval_model_rounds,
-                    max_mcp_tool_calls=self._settings.max_mcp_tool_calls,
+                    max_model_rounds=available_model_rounds,
+                    max_mcp_tool_calls=available_mcp_calls,
                     selected_tools=selected_tools,
                     requirements=ledger.requirements,
                 ),
@@ -566,17 +602,17 @@ class RetrievalEngine:
         mcp_calls = 0
         finalizer_nudged = False
         mcp_budget_exhausted = False
-        tool_cache: dict[str, str] = {}
+        tool_cache = session.exact_call_cache if session is not None else {}
         tool_use_counts: dict[str, int] = {}
         # The deterministic page bridge is our own chaining, not the model spending its
         # budget, so it is counted separately and reported without charging the model.
         bridge_calls = 0
-        seen_semantic: list[tuple[str, frozenset[str]]] = []
+        seen_semantic = session.semantic_call_history if session is not None else []
         duplicate_blocked = 0
         invalid_calls = 0
-        no_progress = 0
+        no_progress = session.no_progress if session is not None else 0
 
-        while model_rounds < self._settings.max_retrieval_model_rounds:
+        while model_rounds < available_model_rounds:
             if not deadline.can_start(0.25):
                 break
             # Keep searching while budget allows, even once citable evidence exists: the
@@ -585,17 +621,13 @@ class RetrievalEngine:
             # evidence sufficient. Reserve the last round for finalize only.
             search_budget_left = (
                 not mcp_budget_exhausted
-                and mcp_calls < self._settings.max_mcp_tool_calls
-                and model_rounds < self._settings.max_retrieval_model_rounds - 1
+                and mcp_calls + bridge_calls < available_mcp_calls
+                and model_rounds < available_model_rounds - 1
                 # Two searches in a row returning nothing citable means this line of enquiry
                 # is not paying off; more of it burns the budget and the clock.
                 and no_progress < MAX_NO_PROGRESS_CALLS
             )
-            round_tools = (
-                retrieval_tools
-                if search_budget_left or not len(registry)
-                else [FINALIZE_RETRIEVAL_TOOL]
-            )
+            round_tools = retrieval_tools if search_budget_left else [FINALIZE_RETRIEVAL_TOOL]
             allowed_tool_names = {
                 tool["function"]["name"]
                 for tool in round_tools
@@ -609,8 +641,8 @@ class RetrievalEngine:
             if not response.tool_calls:
                 if finalizer_nudged:
                     break
-                remaining_rounds = self._settings.max_retrieval_model_rounds - model_rounds
-                remaining_calls = self._settings.max_mcp_tool_calls - mcp_calls
+                remaining_rounds = available_model_rounds - model_rounds
+                remaining_calls = max(0, available_mcp_calls - mcp_calls - bridge_calls)
                 messages.append(
                     {
                         "role": "user",
@@ -697,7 +729,7 @@ class RetrievalEngine:
                         }
                     )
                     continue
-                if mcp_calls >= self._settings.max_mcp_tool_calls:
+                if mcp_calls + bridge_calls >= available_mcp_calls:
                     mcp_budget_exhausted = True
                     should_stop_after_turn = True
                     messages.append(
@@ -744,7 +776,6 @@ class RetrievalEngine:
                     )
                     continue
                 cache_key = _tool_cache_key(tool.name, arguments)
-                semantic_key = _semantic_call_key(tool.name, arguments)
                 cached = tool_cache.get(cache_key)
                 if cached is not None:
                     LOGGER.info("retrieval_tool_cache_hit tool=%s", tool.name)
@@ -786,6 +817,7 @@ class RetrievalEngine:
                     continue
                 seen_semantic.append(semantic_tokens)
                 try:
+                    known_citations = {item.cite_uid for item in registry.all()}
                     result = self._mcp.call_tool(
                         tool.name,
                         arguments,
@@ -794,10 +826,13 @@ class RetrievalEngine:
                     mcp_calls += 1
                     tool_use_counts[tool.name] = used_before + 1
                     cite_uids = registry.register_payload(result, source_tool=tool.name)
+                    new_cite_uids = tuple(
+                        cite_uid for cite_uid in cite_uids if cite_uid not in known_citations
+                    )
                     # index discovery legitimately returns candidates rather than citable
                     # evidence and the bridge below turns it into pages, so it is not a
                     # stall. Any other tool that yields nothing is.
-                    if cite_uids or tool.name == "index_get_relevant_nodes":
+                    if new_cite_uids or tool.name == "index_get_relevant_nodes":
                         no_progress = 0
                     else:
                         no_progress += 1
@@ -833,7 +868,7 @@ class RetrievalEngine:
                         tool.name == "index_get_relevant_nodes"
                         and not cite_uids
                         and page_content_tool is not None
-                        and mcp_calls < self._settings.max_mcp_tool_calls
+                        and mcp_calls + bridge_calls < available_mcp_calls
                         and tool_use_counts.get(page_content_tool.name, 0)
                         < MAX_CALLS_PER_TOOL
                     ):
@@ -861,6 +896,15 @@ class RetrievalEngine:
                                     page_result,
                                     source_tool=page_content_tool.name,
                                 )
+                                new_page_cite_uids = tuple(
+                                    cite_uid
+                                    for cite_uid in page_cite_uids
+                                    if cite_uid not in known_citations
+                                )
+                                if new_page_cite_uids:
+                                    no_progress = 0
+                                else:
+                                    no_progress += 1
                                 LOGGER.info(
                                     "retrieval_tool_completed tool=%s call=%s citations=%s auto=true",
                                     page_content_tool.name,
@@ -895,9 +939,9 @@ class RetrievalEngine:
                                 # this check counts the bridge's own call too.
                                 bridge_budget_left = (
                                     mcp_calls + bridge_calls
-                                    < self._settings.max_mcp_tool_calls
+                                    < available_mcp_calls
                                     and model_rounds
-                                    < self._settings.max_retrieval_model_rounds - 1
+                                    < available_model_rounds - 1
                                 )
                                 if page_cite_uids and not bridge_budget_left:
                                     return RetrievalRun(
@@ -961,7 +1005,7 @@ class RetrievalEngine:
                         "content": rendered,
                     }
                 )
-                if mcp_calls >= self._settings.max_mcp_tool_calls:
+                if mcp_calls + bridge_calls >= available_mcp_calls:
                     mcp_budget_exhausted = True
                     should_stop_after_turn = True
 

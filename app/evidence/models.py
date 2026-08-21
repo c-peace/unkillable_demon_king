@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from dataclasses import dataclass, field
@@ -70,6 +71,7 @@ class EvidenceItem:
     source_type: str = ""
     jurisdiction: str = ""
     version_or_date: str = ""
+    content_hash: str = ""
     raw_preview: str = ""
 
     def to_generation_record(self, relevance_score: float) -> dict[str, Any]:
@@ -82,6 +84,7 @@ class EvidenceItem:
             "title": self.title,
             "url": self.url,
             "version_or_date": self.version_or_date,
+            "verification_status": "candidate",
             "content": self.content or self.raw_preview,
         }
 
@@ -114,6 +117,9 @@ class EvidenceRegistry:
                                 value,
                                 ("version", "date", "updated_at", "effective_date"),
                             ),
+                            content_hash=hashlib.sha256(
+                                (content or _compact_json(value)).encode("utf-8")
+                            ).hexdigest()[:16],
                             raw_preview=_compact_json(value),
                         )
                     registered.append(identifier)
@@ -157,10 +163,14 @@ class EvidenceRequirement:
     claim_or_question: str
     source_preference: str = ""
     clinical_constraints: str = ""
+    jurisdiction: str = ""
+    time_sensitive: bool = False
     criticality: str = "critical"
     status: str = "missing"
     cite_uids: tuple[str, ...] = ()
     gap_reason: str = ""
+    verification_status: str = "unverified"
+    applicability_status: str = "unchecked"
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,10 +220,14 @@ class RetrievalOutcome:
                 "claim_or_question": requirement.claim_or_question,
                 "source_preference": requirement.source_preference,
                 "clinical_constraints": requirement.clinical_constraints,
+                "jurisdiction": requirement.jurisdiction,
+                "time_sensitive": requirement.time_sensitive,
                 "criticality": requirement.criticality,
                 "status": requirement.status,
                 "cite_uids": list(requirement.cite_uids),
                 "gap_reason": requirement.gap_reason,
+                "verification_status": requirement.verification_status,
+                "applicability_status": requirement.applicability_status,
             }
             for requirement in self.requirements
         ]
@@ -288,6 +302,8 @@ def default_requirement_ledger(
                 claim_or_question=requirement.claim_or_question.strip() or query,
                 source_preference=requirement.source_preference.strip(),
                 clinical_constraints=requirement.clinical_constraints.strip(),
+                jurisdiction=requirement.jurisdiction.strip(),
+                time_sensitive=bool(requirement.time_sensitive),
                 criticality=requirement.criticality.strip() or "critical",
                 status=(
                     requirement.status
@@ -300,6 +316,8 @@ def default_requirement_ledger(
                     if isinstance(cite_uid, str) and cite_uid.strip()
                 ),
                 gap_reason=requirement.gap_reason.strip(),
+                verification_status=requirement.verification_status,
+                applicability_status=requirement.applicability_status,
             )
         )
     if not normalized:
@@ -320,20 +338,28 @@ def _outcome_requirement(
             claim_or_question=requirement.claim_or_question,
             source_preference=requirement.source_preference,
             clinical_constraints=requirement.clinical_constraints,
+            jurisdiction=requirement.jurisdiction,
+            time_sensitive=requirement.time_sensitive,
             criticality=requirement.criticality,
             status="supported",
             cite_uids=cite_uids,
             gap_reason="",
+            verification_status=requirement.verification_status,
+            applicability_status=requirement.applicability_status,
         )
     return EvidenceRequirement(
         id=requirement.id,
         claim_or_question=requirement.claim_or_question,
         source_preference=requirement.source_preference,
         clinical_constraints=requirement.clinical_constraints,
+        jurisdiction=requirement.jurisdiction,
+        time_sensitive=requirement.time_sensitive,
         criticality=requirement.criticality,
         status="unresolved",
         cite_uids=cite_uids,
         gap_reason=note or "Evidence remained incomplete.",
+        verification_status=requirement.verification_status,
+        applicability_status=requirement.applicability_status,
     )
 
 
@@ -474,10 +500,16 @@ def parse_final_selection(
                 claim_or_question=expected.claim_or_question,
                 source_preference=expected.source_preference,
                 clinical_constraints=expected.clinical_constraints,
+                jurisdiction=expected.jurisdiction,
+                time_sensitive=expected.time_sensitive,
                 criticality=expected.criticality,
                 status=requirement_status,
                 cite_uids=tuple(cite_uids),
                 gap_reason=gap_reason,
+                verification_status=(
+                    "model_selected" if requirement_status in {"supported", "contradicted"} else "unverified"
+                ),
+                applicability_status=expected.applicability_status,
             )
 
         finalized_requirements = tuple(
@@ -488,10 +520,14 @@ def parse_final_selection(
                     claim_or_question=requirement.claim_or_question,
                     source_preference=requirement.source_preference,
                     clinical_constraints=requirement.clinical_constraints,
+                    jurisdiction=requirement.jurisdiction,
+                    time_sensitive=requirement.time_sensitive,
                     criticality=requirement.criticality,
                     status="unresolved",
                     cite_uids=(),
                     gap_reason=note or "Requirement was not closed by finalize_retrieval.",
+                    verification_status="unverified",
+                    applicability_status=requirement.applicability_status,
                 ),
             )
             for requirement in ledger.requirements
@@ -559,20 +595,36 @@ def fallback_selection(
     mcp_calls: int,
     max_items: int,
 ) -> RetrievalOutcome:
-    evidence = registry.all()[:max_items]
+    ledger = default_requirement_ledger(query, requirements=requirements)
+    # Registry membership proves provenance, not relevance. On budget/finalizer failure,
+    # expose only evidence already linked to a requirement; never promote the first page
+    # merely because the bridge happened to retrieve it.
+    linked_ids = tuple(
+        dict.fromkeys(
+            cite_uid
+            for requirement in ledger.requirements
+            if requirement.status in {"supported", "contradicted"}
+            for cite_uid in requirement.cite_uids
+            if registry.get(cite_uid) is not None
+        )
+    )[:max_items]
+    evidence = tuple(
+        item for cite_uid in linked_ids if (item := registry.get(cite_uid)) is not None
+    )
     items = tuple(CitableItem(item.cite_uid, 0.0) for item in evidence)
     status = "partial" if evidence else "no_evidence"
-    ledger = default_requirement_ledger(query, requirements=requirements)
     return RetrievalOutcome(
         status=status,
         items=items,
         note=note,
         evidence=evidence,
         requirements=tuple(
-            _outcome_requirement(
+            requirement
+            if requirement.status in {"supported", "contradicted"}
+            else _outcome_requirement(
                 requirement,
                 status=status,
-                cite_uids=tuple(item.cite_uid for item in evidence),
+                cite_uids=(),
                 note=note,
             )
             for requirement in ledger.requirements

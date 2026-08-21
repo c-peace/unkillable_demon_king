@@ -5,6 +5,8 @@ import unittest
 from app.clients.mcp import McpTool
 from app.config import Settings
 from app.deadline import Deadline
+from app.evidence.models import EvidenceRequirement
+from app.evidence.session import RetrievalSession
 from app.orchestration.retrieval import RetrievalEngine
 from tests.fakes import ScriptedL2, l2_tool_call
 
@@ -76,6 +78,33 @@ class ProgressionMcp:
 
 
 class RetrievalProgressionTests(unittest.TestCase):
+    def test_cumulative_session_does_not_reset_model_round_budget(self) -> None:
+        settings = Settings(
+            lunit_fm_api_key="test",
+            max_retrieval_model_rounds=2,
+            max_mcp_tool_calls=3,
+            mcp_tool_mode="all",
+        )
+        session = RetrievalSession.create(
+            (EvidenceRequirement(id="remaining", claim_or_question="remaining claim"),)
+        )
+        session.cumulative_model_rounds = 2
+        retrieval = RetrievalEngine(
+            settings,
+            l2=ScriptedL2([]),
+            mcp=ProgressionMcp(),  # type: ignore[arg-type]
+        )
+
+        run = retrieval.run(
+            "remaining claim",
+            deadline=Deadline.after(3),
+            session=session,
+        )
+
+        self.assertEqual(run.l2_calls, 0)
+        self.assertEqual(run.outcome.status, "no_evidence")
+        self.assertEqual(run.diagnostics["stop_reason"], "model_budget_exhausted")
+
     def test_repeated_identical_discovery_calls_do_not_consume_mcp_budget(self) -> None:
         settings = Settings(
             lunit_fm_api_key="test",
@@ -175,8 +204,8 @@ class RetrievalProgressionTests(unittest.TestCase):
             deadline=Deadline.after(3),
         )
 
-        self.assertEqual(run.outcome.status, "partial")
-        self.assertEqual(run.outcome.evidence[0].cite_uid, "cite-guideline-page")
+        self.assertEqual(run.outcome.status, "no_evidence")
+        self.assertFalse(run.outcome.evidence)
         self.assertEqual(
             mcp.calls,
             [

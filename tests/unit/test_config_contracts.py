@@ -68,6 +68,11 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.max_tool_result_chars, 8_000)
         self.assertEqual(settings.max_evidence_items, 6)
         self.assertEqual(settings.max_evidence_chars, 8_000)
+        self.assertEqual(settings.clinical_state_policy, "structured")
+        self.assertEqual(settings.admission_policy, "claim")
+        self.assertEqual(settings.retrieval_session_policy, "cumulative")
+        self.assertEqual(settings.evidence_verification_policy, "high_risk")
+        self.assertEqual(settings.response_contract_policy, "typed")
 
     def test_request_timeout_zero_disables_global_deadline(self) -> None:
         settings = Settings.from_env({"REQUEST_TIMEOUT_SEC": "0"})
@@ -94,6 +99,24 @@ class SettingsTests(unittest.TestCase):
     def test_invalid_mode_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "MCP_TOOL_MODE"):
             Settings.from_env({"MCP_TOOL_MODE": "magic"})
+
+    def test_invalid_semantic_verification_dependency_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "semantic evidence verification"):
+            Settings.from_env(
+                {
+                    "RETRIEVAL_SESSION_POLICY": "legacy",
+                    "EVIDENCE_VERIFICATION_POLICY": "high_risk",
+                }
+            )
+
+    def test_claim_admission_requires_structured_state(self) -> None:
+        with self.assertRaisesRegex(ValueError, "ADMISSION_POLICY=claim"):
+            Settings.from_env(
+                {
+                    "CLINICAL_STATE_POLICY": "legacy",
+                    "ADMISSION_POLICY": "claim",
+                }
+            )
 
 
 class ContractTests(unittest.TestCase):

@@ -123,6 +123,12 @@ class Settings:
     retrieval_ledger_policy: str = "ledger"
     review_policy: str = "conditional"
     empty_recovery_policy: str = "stateful"
+    clinical_state_policy: str = "structured"
+    admission_policy: str = "claim"
+    retrieval_session_policy: str = "cumulative"
+    evidence_verification_policy: str = "high_risk"
+    response_contract_policy: str = "typed"
+    evidence_verifier_timeout_sec: float = 30.0
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":
@@ -160,6 +166,46 @@ class Settings:
         ).strip().lower()
         if recovery_policy not in {"legacy", "stateful"}:
             raise ValueError("EMPTY_RECOVERY_POLICY must be 'legacy' or 'stateful'")
+        clinical_state_policy = (
+            source.get("CLINICAL_STATE_POLICY") or "structured"
+        ).strip().lower()
+        if clinical_state_policy not in {"legacy", "structured", "hybrid"}:
+            raise ValueError(
+                "CLINICAL_STATE_POLICY must be 'legacy', 'structured', or 'hybrid'"
+            )
+        admission_policy = (source.get("ADMISSION_POLICY") or "claim").strip().lower()
+        if admission_policy not in {"legacy", "claim"}:
+            raise ValueError("ADMISSION_POLICY must be 'legacy' or 'claim'")
+        retrieval_session_policy = (
+            source.get("RETRIEVAL_SESSION_POLICY") or "cumulative"
+        ).strip().lower()
+        if retrieval_session_policy not in {"legacy", "cumulative"}:
+            raise ValueError(
+                "RETRIEVAL_SESSION_POLICY must be 'legacy' or 'cumulative'"
+            )
+        evidence_verification_policy = (
+            source.get("EVIDENCE_VERIFICATION_POLICY") or "high_risk"
+        ).strip().lower()
+        if evidence_verification_policy not in {"structural", "high_risk", "always"}:
+            raise ValueError(
+                "EVIDENCE_VERIFICATION_POLICY must be 'structural', 'high_risk', or 'always'"
+            )
+        response_contract_policy = (
+            source.get("RESPONSE_CONTRACT_POLICY") or "typed"
+        ).strip().lower()
+        if response_contract_policy not in {"legacy", "typed"}:
+            raise ValueError(
+                "RESPONSE_CONTRACT_POLICY must be 'legacy' or 'typed'"
+            )
+        if admission_policy == "claim" and clinical_state_policy == "legacy":
+            raise ValueError("ADMISSION_POLICY=claim requires structured clinical state")
+        if (
+            evidence_verification_policy in {"high_risk", "always"}
+            and retrieval_session_policy != "cumulative"
+        ):
+            raise ValueError(
+                "semantic evidence verification requires RETRIEVAL_SESSION_POLICY=cumulative"
+            )
 
         key = source.get("LUNIT_FM_API_KEY")
         if env is None and (not key or not key.strip()):
@@ -267,4 +313,15 @@ class Settings:
             retrieval_ledger_policy=ledger_policy,
             review_policy=review_policy,
             empty_recovery_policy=recovery_policy,
+            clinical_state_policy=clinical_state_policy,
+            admission_policy=admission_policy,
+            retrieval_session_policy=retrieval_session_policy,
+            evidence_verification_policy=evidence_verification_policy,
+            response_contract_policy=response_contract_policy,
+            evidence_verifier_timeout_sec=_as_float(
+                source.get("EVIDENCE_VERIFIER_TIMEOUT_SEC"),
+                30.0,
+                minimum=1.0,
+                maximum=120.0,
+            ),
         )

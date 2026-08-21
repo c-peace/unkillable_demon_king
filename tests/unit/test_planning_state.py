@@ -9,6 +9,7 @@ from app.orchestration.planning import (
     RESPONSE_ANSWER_WITH_QUESTION,
     build_harness_plan,
 )
+from app.prompts import generation_after_retrieval_prompt, review_system_prompt
 
 
 def _compiled(*user_turns: str):
@@ -150,6 +151,85 @@ class PlanningStateTests(unittest.TestCase):
         self.assertEqual(rewrite.response_contract, RESPONSE_ANSWER_ONLY)
         self.assertFalse(rewrite.retrieval_allowed)
         self.assertFalse(rewrite.review_reasons)
+
+    def test_semantic_risk_and_claim_admission_are_independent(self) -> None:
+        stroke = build_harness_plan(
+            _compiled("갑자기 한쪽 팔에 힘이 빠지고 말이 어눌해졌어요."),
+            Settings(),
+        )
+        clinician = build_harness_plan(
+            _compiled("I'm a clinician asking for general information about medication use during pregnancy."),
+            Settings(),
+        )
+        medication = build_harness_plan(
+            _compiled("Is warfarin 5 mg safe during pregnancy?"),
+            Settings(),
+        )
+
+        self.assertEqual(stroke.lane, "HIGH_RISK")
+        self.assertEqual(stroke.clinical_risk.value, "emergency")
+        self.assertEqual(stroke.interaction_mode.value, "answer_and_clarify")
+        self.assertEqual(clinician.lane, "DIRECT")
+        self.assertEqual(clinician.clinical_risk.value, "routine")
+        self.assertEqual(medication.retrieval_domains, ("drug_safety",))
+
+    def test_clarification_blocks_invalid_retrieval_but_not_emergency_action(self) -> None:
+        dose = build_harness_plan(
+            _compiled("What dose should I take for fever?"),
+            Settings(),
+        )
+        emergency = build_harness_plan(
+            _compiled("갑자기 한쪽 팔에 힘이 빠지고 말이 어눌해졌어요."),
+            Settings(),
+        )
+
+        self.assertEqual(dose.interaction_mode.value, "clarify_first")
+        self.assertFalse(dose.retrieval_allowed)
+        self.assertEqual(emergency.interaction_mode.value, "answer_and_clarify")
+
+    def test_general_adverse_effect_mechanism_does_not_force_retrieval(self) -> None:
+        plan = build_harness_plan(
+            _compiled("항생제는 왜 설사 부작용이 생기나요?"),
+            Settings(),
+        )
+
+        self.assertEqual(plan.task_kind.value, "general_education")
+        self.assertFalse(plan.retrieval_allowed)
+
+    def test_coding_contract_does_not_inherit_triage_checklist(self) -> None:
+        plan = build_harness_plan(
+            _compiled("What is the KCD code for type 2 diabetes?"),
+            Settings(),
+        )
+
+        generation_prompt = generation_after_retrieval_prompt(plan.contract_spec)
+        review_prompt = review_system_prompt(plan.contract_spec)
+        self.assertIn("Type: coding", generation_prompt)
+        self.assertIn("Do not expand into: triage, dosing", generation_prompt)
+        self.assertNotIn("who to see, how soon", generation_prompt)
+        self.assertIn("Allowed issue categories", review_prompt)
+        self.assertNotIn("Does the draft say plainly who to see", review_prompt)
+
+    def test_note_as_a_verb_does_not_disable_drug_safety_retrieval(self) -> None:
+        compiled = _compiled("What side effects should I note while taking warfarin?")
+        plan = build_harness_plan(compiled, Settings())
+
+        self.assertFalse(compiled.state.is_text_operation)
+        self.assertEqual(plan.task_kind.value, "medication_safety")
+        self.assertEqual(plan.retrieval_domains, ("drug_safety",))
+
+    def test_old_symptoms_do_not_turn_an_unrelated_latest_question_into_triage(self) -> None:
+        compiled = compile_conversation(
+            [
+                {"role": "user", "content": "갑자기 한쪽 팔에 힘이 빠지고 말이 어눌해졌어요."},
+                {"role": "assistant", "content": "즉시 평가가 필요합니다."},
+                {"role": "user", "content": "감기는 왜 생기나요?"},
+            ]
+        )
+        plan = build_harness_plan(compiled, Settings())
+
+        self.assertEqual(plan.task_kind.value, "general_education")
+        self.assertEqual(plan.lane, "DIRECT")
 
 
 if __name__ == "__main__":

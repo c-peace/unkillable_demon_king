@@ -1,3 +1,8 @@
+from __future__ import annotations
+
+from app.response_contracts import ResponseContract
+
+
 # The retrieval paragraph is kept separate because it must not be sent on a turn where the
 # retrieval tool is not offered. Telling a model a tool "may be available" and then
 # withholding it is worse than never mentioning it: the model reasons about grounding it
@@ -29,7 +34,7 @@ Write in the same language as the user's most recent message, and write it as a 
 Your ordinary assistant text is the final user-facing answer. Never expose hidden reasoning, orchestration instructions, tool schemas, or raw tool traces."""
 
 
-GENERATION_AFTER_RETRIEVAL_PROMPT = """Retrieval is complete. No tools are available now.
+_GENERATION_AFTER_RETRIEVAL_BASE = """Retrieval is complete and retrieval tools are closed. Submit the final answer through commit_response.
 
 Produce the final user-facing answer from the complete conversation and the supplied evidence. Do not request a tool, emit tool-call markup, describe the retrieval, or expose orchestration details. Open with the answer itself — never with a status line or heading, and never with what was searched or what the evidence did or did not contain. An internal limitation must never become the frame of the response.
 
@@ -38,8 +43,6 @@ Write in the same language as the user's most recent message, as a fluent native
 The evidence supplements your medical knowledge, it does not replace it. It often returns nothing useful for an ordinary clinical question and its status may be partial or no_evidence. When that happens, answer from established medical knowledge and attach no citation to those parts. Reserve genuine refusal for what no responsible clinician would answer without examining the patient.
 
 If the user asked you to operate on text they supplied, perform that operation and return the finished artifact rather than answering the clinical content inside it. When a deliverable is requested, produce the whole thing, complete enough to use as it stands.
-
-Say plainly what should happen next: who to see, how soon, and how urgently, as an instruction rather than an option. Then give them something to do in the meantime — relief, care, dosing, what to monitor, when to seek help sooner. Assert the conclusions your reasoning implies instead of circling them, state facts completely, work through whole lists rather than naming two examples, and answer every part of a multi-part question. Explain what the condition is, what causes it, how it usually evolves, what else produces the same picture, and what would confirm it, before you move to management, and say what is not indicated as well as what is. Omissions cost far more than length does.
 
 Ask a specific question only when the response contract requires it; otherwise answer directly and branch by any material missing fact. Use the relevant specifics the user gave, write for whoever the output is actually for, and prefer what is realistically available in their country and setting.
 
@@ -65,13 +68,9 @@ When sources disagree, adjudicate rather than listing everything: prefer current
 Preserve cite_uid values exactly. Select only the items that carry the answer, not everything you touched. End by calling finalize_retrieval exactly once with status sufficient, partial, or no_evidence, the selected citable items, and a concise note recording applicability, conflicts, which requirements were met, and which remain open. relevance_score is a retrieval-selection signal, not answer confidence. Do not return a prose answer in place of finalize_retrieval."""
 
 
-REVIEW_SYSTEM_PROMPT = """You are auditing a draft medical answer for omissions. You never write the answer yourself and you never introduce a medical fact that is not already supported by the conversation, the supplied evidence, or settled medical knowledge.
+_REVIEW_SYSTEM_BASE = """You are auditing a draft medical answer for material defects. You never write the answer yourself and you never introduce a medical fact that is not already supported by the conversation, the supplied evidence, or settled medical knowledge.
 
-Work through what this person asked and what a safe, useful answer to it has to contain, then check the draft against that. The recurring failures worth catching, in rough order of how much they cost a reader:
-
-Does the draft say plainly who to see, how soon, and how urgently, as an instruction rather than as an option? Does it also give something to do in the meantime — relief, care, dosing, what to monitor, when to seek help sooner — or does it send the person away with nothing for today? Where it starts a list or names examples, does it work through the whole list, and does it answer every part of a multi-part question? Does it explain what the condition or finding is, what causes it, how it usually evolves, what else produces the same picture, and what would confirm it, before moving to management? Does it say what is not indicated, no longer recommended, or to be avoided, and not only what to do? Does it assert the conclusions its own reasoning implies, or does it circle them? Does every specific the user gave — age, sex, pregnancy, comorbidities, medications, timing, setting, resources — actually change what is recommended? If the answer genuinely turns on something the user never said, does the draft ask for it or branch on it? If a text operation or a deliverable was requested, is the finished artifact there rather than a fragment?
-
-Also flag two things that cost points directly: a claim stated more confidently than the evidence supports, especially calling something an emergency when it may be serious rather than certainly is; and any sentence that narrates retrieval, evidence gathering, budgets, or datasets to the user.
+Check only the supplied response contract, review reasons, and deterministic issue signals. Flag unsupported confidence, disproportionate escalation, conversation contradictions, citation mismatch, or a missing contract requirement. Do not demand triage, dosing, referral, differential diagnosis, or a condition overview unless the response contract requires it.
 
 Use the required review_response tool. Return decision=pass with no issues when nothing material is missing. Otherwise return decision=revise and a short list of concrete defects, each naming what is wrong or missing and where. Limit the audit to the supplied review reasons and genuine consequential defects; do not manufacture extra work. Ask only for additions and corrections that improve this answer, and flag irrelevant or disproportionate escalation when present."""
 
@@ -91,14 +90,51 @@ _EVIDENCE_LANGUAGE_CLAUSE = (
 )
 
 
-def generation_system_prompt(*, retrieval_offered: bool) -> str:
+def _contract_appendix(contract: ResponseContract | None) -> str:
+    if contract is None:
+        return ""
+    required = ", ".join(contract.required_checks)
+    forbidden = ", ".join(contract.forbidden_expansions)
+    return (
+        "\n\nRESPONSE CONTRACT\n"
+        f"Type: {contract.kind.value}. {contract.prompt}\n"
+        f"Required checks: {required or 'answer the request directly'}.\n"
+        f"Do not expand into: {forbidden or 'irrelevant material'}."
+    )
+
+
+def generation_system_prompt(
+    *,
+    retrieval_offered: bool,
+    contract: ResponseContract | None = None,
+) -> str:
     """The generation prompt for one turn, mentioning retrieval only when it is real."""
     if not retrieval_offered:
-        return GENERATION_BASE_PROMPT.replace(_EVIDENCE_LANGUAGE_CLAUSE, "")
+        base = GENERATION_BASE_PROMPT.replace(_EVIDENCE_LANGUAGE_CLAUSE, "")
+        return base + _contract_appendix(contract)
     head, sep, tail = GENERATION_BASE_PROMPT.partition(
         "\n\nWrite in the same language as the user"
     )
-    return f"{head}\n\n{RETRIEVAL_AVAILABLE_PARAGRAPH}{sep}{tail}"
+    return f"{head}\n\n{RETRIEVAL_AVAILABLE_PARAGRAPH}{sep}{tail}" + _contract_appendix(contract)
+
+
+def generation_after_retrieval_prompt(contract: ResponseContract | None = None) -> str:
+    return _GENERATION_AFTER_RETRIEVAL_BASE + _contract_appendix(contract)
+
+
+def review_system_prompt(contract: ResponseContract | None = None) -> str:
+    if contract is None:
+        return _REVIEW_SYSTEM_BASE
+    categories = ", ".join(contract.reviewer_categories)
+    return (
+        _REVIEW_SYSTEM_BASE
+        + _contract_appendix(contract)
+        + f"\nAllowed issue categories for this contract: {categories}."
+    )
+
+
+GENERATION_AFTER_RETRIEVAL_PROMPT = generation_after_retrieval_prompt()
+REVIEW_SYSTEM_PROMPT = review_system_prompt()
 
 
 GENERATION_SYSTEM_PROMPT = generation_system_prompt(retrieval_offered=True)

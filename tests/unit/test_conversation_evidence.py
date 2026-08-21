@@ -236,7 +236,7 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(outcome.status, "partial")
         self.assertEqual(outcome.requirement.status, "contradicted")
 
-    def test_budget_fallback_is_partial_with_registered_evidence(self) -> None:
+    def test_budget_fallback_does_not_promote_unadjudicated_registry_items(self) -> None:
         registry = EvidenceRegistry()
         registry.register_payload(
             {"cite_uid": "cite-2", "content": "partial support"},
@@ -250,8 +250,8 @@ class EvidenceTests(unittest.TestCase):
             mcp_calls=2,
             max_items=8,
         )
-        self.assertEqual(outcome.status, "partial")
-        self.assertEqual(outcome.evidence[0].cite_uid, "cite-2")
+        self.assertEqual(outcome.status, "no_evidence")
+        self.assertFalse(outcome.evidence)
 
 
 class RoutingTests(unittest.TestCase):

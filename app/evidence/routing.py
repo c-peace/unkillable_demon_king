@@ -134,6 +134,11 @@ ROUTE_LABELS: tuple[str, ...] = (
     "faers",
 )
 
+DOMAIN_TOOL_NAMES: dict[str, tuple[str, ...]] = {
+    label: tool_names
+    for label, (_pattern, tool_names) in zip(ROUTE_LABELS, ROUTING_RULES)
+}
+
 
 TOOL_PRIORITY: dict[str, int] = {
     "index_list_documents": 10,
@@ -176,6 +181,21 @@ class SourceRouter:
             for label, (pattern, _tools) in zip(ROUTE_LABELS, ROUTING_RULES)
             if pattern.search(query)
         )
+
+    def select_for_domains(
+        self,
+        domains: Sequence[str],
+        tools: Sequence[McpTool],
+        *,
+        fallback_query: str,
+    ) -> tuple[McpTool, ...]:
+        if self._mode == "all":
+            return tuple(tools)
+        requested_names: list[str] = []
+        for domain in domains:
+            requested_names.extend(DOMAIN_TOOL_NAMES.get(domain, ()))
+        selected = self._select_names(tuple(dict.fromkeys(requested_names)), tools)
+        return selected or self.select(fallback_query, tools)
 
     def _match_tool_names(self, query: str) -> tuple[str, ...]:
         matched: list[str] = []

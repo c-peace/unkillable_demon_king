@@ -9,7 +9,8 @@ from app.clients.l2 import L2Client, parse_tool_arguments
 from app.conversation import CompiledConversation
 from app.deadline import Deadline
 from app.errors import AppError
-from app.prompts import REVIEW_SYSTEM_PROMPT, REVISION_SYSTEM_PROMPT
+from app.prompts import REVISION_SYSTEM_PROMPT, review_system_prompt
+from app.response_contracts import ResponseContract
 
 
 class ReviewReason(StrEnum):
@@ -129,6 +130,7 @@ class ConditionalReviewer:
         reasons: Sequence[str],
         *,
         deadline: Deadline,
+        contract: ResponseContract | None = None,
     ) -> ReviewRun:
         usage: dict[str, int] = {}
         reason_text = ",".join(dict.fromkeys(str(reason) for reason in reasons))
@@ -140,7 +142,7 @@ class ConditionalReviewer:
         try:
             review = self._l2.complete(
                 [
-                    {"role": "system", "content": REVIEW_SYSTEM_PROMPT},
+                    {"role": "system", "content": review_system_prompt(contract)},
                     {"role": "user", "content": audit_input},
                 ],
                 deadline=deadline,
@@ -152,6 +154,15 @@ class ConditionalReviewer:
             if parsed is None:
                 return ReviewRun(draft, 1, False, False, "review_unavailable", usage)
             decision, issues = parsed
+            if contract is not None and issues:
+                allowed = set(contract.reviewer_categories)
+                issues = [
+                    issue
+                    for issue in issues
+                    if issue["category"] in allowed or issue["category"] == "legacy_review"
+                ]
+                if decision == "revise" and not issues:
+                    return ReviewRun(draft, 1, False, False, "review_unavailable", usage)
             if decision == "pass":
                 return ReviewRun(draft, 1, True, False, "passed", usage)
             if not deadline.can_start(1.0):

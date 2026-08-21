@@ -4,11 +4,25 @@ Last updated: 2026-08-22 (Asia/Seoul)
 
 ## Current objective
 
-Validate the corrected stateful planner, atomic retrieval ledger, conditional review, evidence-preserving recovery, and request-correlated observability before the next benchmark run.
+Stabilize the harness under evaluator concurrency and upstream L2 tail latency, then measure the
+live L2/MCP behavior and benchmark impact of the newly implemented semantic-control layers without
+changing the submission API boundary.
 
 ## Current phase
 
-**The release-blocking orchestration gaps found in post-implementation review are closed in code and protected by synthetic regressions.** Retrieval remains open after partial evidence and closes only on sufficiency or budget exhaustion; atomic requirements are mandatory at the tool boundary and deterministically seeded from explicit evidence asks; post-retrieval recovery retains grounding payloads; and planner/review boundaries now handle negation, omitted medication names, elliptical follow-ups, text operations, and independent review flags consistently. Live L2/MCP behavior and benchmark impact remain to be measured.
+**The five semantic-control improvements are implemented, code-reviewed, and locally verified.**
+The harness now compiles provenance-linked clinical state, plans risk/evidence/clarification as
+independent decisions, retains one cumulative request-local retrieval ledger and budget, verifies
+source applicability before generation, and applies task-specific generation/review contracts.
+Generation, review, recovery, and trace now consume the same verified cumulative evidence snapshot.
+Live L2/MCP behavior and benchmark impact remain to be measured.
+
+A historical CoEval run supplied by the user was cancelled after repeated candidate L2 timeouts/
+HTTP 502 failures and independent judge-format failures. Reliability review found a concrete
+configuration mismatch: CoEval allows 16 concurrent candidate requests and waits 180 seconds,
+while the submission currently has no upstream L2 concurrency gate, uses a 60-second L2 timeout,
+and disables the whole-request deadline. No reliability implementation was changed during this
+analysis.
 
 ## Workspace status
 
@@ -52,6 +66,7 @@ Validate the corrected stateful planner, atomic retrieval ledger, conditional re
 - Implemented the targeted harness-remediation slice for planner/retrieval/review/recovery: conversation compilation now produces request-local state with follow-up references, safety facts, corrections, and explicit asks; admission can read that state; generation can choose between answer-only and answer-plus-question commit contracts; retrieval accepts requirement ledgers and validates `finalize_retrieval` against known requirement ids and selected citations; conditional review uses structured defects and reason-based triggering; empty-output recovery can switch to a stateful recovery packet instead of blindly trimming turns.
 - Added privacy-safe request-correlated observability with `contextvars`, structured planner/retrieval/review/recovery fields in the final trace, and no raw conversation, evidence, response, or credential logging.
 - Closed the post-review planner and orchestration gaps: partial retrieval no longer receives a retrieval-closed prompt, explicit multi-part evidence asks seed atomic ledger requirements even when generation omits them, recovery packets retain compact grounding payloads, generic dose questions require a medication name, mixed negated/active risks stay distinguishable, medication ellipsis follow-ups resolve against prior turns, text operations do not inherit quoted clinical risk, broad triage wording no longer implies guideline retrieval, and high-risk review can be disabled without suppressing evidence/history/format review.
+- Implemented the semantic-grounding v2 plan: provenance-linked clinical facts and relationship-based hard risks, claim/task-based retrieval admission with clarification-first gates, a cumulative request-local retrieval session with shared model/MCP budgets and caches, deterministic plus conditional semantic evidence verification, and typed response-specific generation/review contracts. All new boundaries have explicit policy flags and fail-soft fallbacks.
 - Verified the development L2 endpoint with a basic request and the standard OpenAI non-streaming tool-call/tool-result continuation contract. The endpoint can return `finish_reason: "stop"` alongside `message.tool_calls`, and the adapter correctly uses the latter as authoritative.
 - Discovered all 21 live MCP schemas, negotiated protocol `2025-03-26`, observed successful stateless JSON calls, and validated the structured `index_get_page_content` citation shape.
 - Completed a general synthetic guideline request through Generation -> Retrieval L2 -> three MCP calls -> `finalize_retrieval` -> final L2 generation, selecting four evidence items without retaining raw clinical content in project state.
@@ -82,6 +97,7 @@ Validate the corrected stateful planner, atomic retrieval ledger, conditional re
 - Implement SEMA-style interpretation/exploration/adjudication initially inside one retrieval-stage L2 loop backed by a harness-validated Evidence Requirement Ledger; do not multiply L2 agents unless ablation shows a benefit.
 - Treat `finalize_retrieval(status="sufficient")` as a validated completion decision over critical evidence requirements, not as a model's unverified impression that search results look adequate.
 - Keep the planner, retrieval ledger, review, and empty-response recovery boundaries independently switchable through policy flags so each advanced layer can be ablated without rewriting the transport or MCP path.
+- Keep clinical state, claim admission, cumulative retrieval, evidence verification, and typed response contracts independently observable and reversible through their policy flags; semantic enrichment remains opt-in (`hybrid`) and semantic evidence verification remains conditional by default (`high_risk`).
 
 ## Verification evidence
 
@@ -126,6 +142,9 @@ Validate the corrected stateful planner, atomic retrieval ledger, conditional re
 - `python3 -m unittest discover -s tests -q` passed all 82 unit and integration tests together, including stateful recovery and contradicted-critical-evidence regressions; `python3 -m compileall -q app tests` and `git diff --check` also completed successfully.
 - After the post-review fixes, `python3 -m unittest discover -s tests -q` passed all 93 unit and integration tests, including new regressions for the second-retrieval transition, atomic plan requirements, grounding-preserving recovery, generic-dose clarification, ellipsis follow-ups, mixed negation, text-operation isolation, narrower review triggering, independent review flags, and final-lane consistency. `python3 -m compileall -q app tests` and `git diff --check` also passed.
 - `docker build -t lunit-hackathon-driver:review-fix .` completed in 1.27 seconds after the post-review fixes. Docker repeated the existing `SecretsUsedInArgOrEnv` warning for the credential environment-variable declaration; the build itself succeeded and the warning was not introduced by this remediation slice.
+- After semantic-grounding v2 implementation and final review fixes, `python3 -B -m unittest discover -s tests -q` passed all 118 unit and loopback integration tests. The suite includes regressions for provenance/risk state, clarification-first planning, cumulative evidence and budgets, structural/semantic verification, verified generation payloads, and contract-scoped review.
+- `python3 -B -m compileall -q app tests` and `git diff --check` completed successfully after the final implementation edits.
+- `docker build -t lunit-hackathon-driver:semantic-v2-final .` completed successfully. The resulting container started on host port 18007 and returned valid payloads from `/healthz` and `/v1/models`; the temporary container then stopped cleanly. Docker repeated the existing credential-environment warning noted above.
 
 ## Open questions and blockers
 
@@ -139,12 +158,17 @@ Validate the corrected stateful planner, atomic retrieval ledger, conditional re
 - Earlier CoEval trials used an image without a key, so `/v1/models` succeeded while chat returned immediate `503 service_not_configured`; the wrapper later surfaced only `coeval_failed`. The credential path has now been corrected locally and awaits a new dashboard trial.
 - The previous global `REQUEST_TIMEOUT_SEC=90` path is no longer the default bottleneck. Current defaults favor `family` MCP routing, fewer retrieval rounds/tool calls, smaller evidence payloads, and retrieval-step deduplication while keeping per-call upstream timeouts in place.
 - The indexed guideline/HIRA retrieval bridge now auto-fetches page content when the relevant node result exposes a document id and page range; the remaining risk is whether live organizer responses use the same metadata keys as the development fake.
+- The historical cancelled CoEval run is not a valid end-to-end score: candidate inference failures and judge parse failures are independent missing-data mechanisms. Its successful request traces remain usable for latency/call-shape diagnosis only.
+- Under the current CoEval validation configuration, up to 16 inbound candidate requests can reach the unbounded `ThreadingHTTPServer`; the harness has no semaphore or queue around L2 calls. A normal grounded high-risk request can add retrieval, semantic verification, and review L2 calls, so upstream instability can be amplified by optional work.
+- The local submission environment uses a 60-second per-call L2 timeout with no whole-request deadline, while CoEval waits 180 seconds per inference attempt. This can abort legitimate tail-latency calls early yet still allow a multi-stage request to overrun the evaluator deadline.
+- CoEval's judge parser accepts only an almost exact JSON object/fence shape and retries the same deterministic request after parse failure. Judge parsing/repair and failed-claim replay are evaluator concerns, not candidate-harness behavior.
 
 ## Next actions
 
-1. Measure the corrected planner/ledger/review/recovery slice on fast synthetic and dashboard-style prompts.
-2. Run a focused live L2/MCP behavior check for partial-to-second-retrieval and empty post-retrieval recovery.
-3. Run Patient Simulator, systematic ablations, and dashboard aggregate validation before creating the final `lunit/hackathon-submission` branch and verifying the full SHA/model.
+1. Add an upstream L2 concurrency governor, deadline-aware admission, a request deadline below the evaluator timeout, and reserved time for the final L2 answer.
+2. Make optional retrieval verification/review failure-aware and stage-budgeted; preserve an L2-generated provisional answer so later-stage failure can still return usable content.
+3. Add stage-specific token/time budgets, status-aware 502/429 retry with jitter, and privacy-safe queue/timeout/status observability; then stress-test at CoEval concurrency 16.
+4. Separately harden CoEval judge structured parsing/repair and replay only scoring-failed claims from saved candidate outputs before treating a run as comparable.
 
 ## Update protocol
 

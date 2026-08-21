@@ -12,7 +12,7 @@ from app.config import Settings
 from app.contracts import ChatCompletionRequest
 from app.deadline import Deadline
 from app.errors import UpstreamError
-from app.evidence.models import EvidenceRequirement, RetrievalOutcome
+from app.evidence.models import CitableItem, EvidenceRequirement, RetrievalOutcome
 from app.orchestration.driver import ConversationDriver
 from app.orchestration.retrieval import RetrievalEngine
 from tests.fakes import NeverRetrieval, ScriptedL2, l2_content, l2_tool_call
@@ -115,6 +115,49 @@ class PartialRetrieval:
                 mcp_calls=0,
             ),
             diagnostics={"stop_reason": "partial"},
+            l2_calls=1,
+            usage={},
+        )
+
+
+class CumulativeRetrieval:
+    def __init__(self) -> None:
+        self.target_ids: list[tuple[str, ...]] = []
+
+    def run(self, query: str, *, deadline, requirements=(), session=None):
+        targets = session.target_requirements(requirements) if session is not None else tuple(requirements)
+        self.target_ids.append(tuple(requirement.id for requirement in targets))
+        current = targets[0]
+        cite_uid = f"cite-{current.id}"
+        if session is not None:
+            session.registry.register_payload(
+                {"cite_uid": cite_uid, "content": f"evidence for {current.id}"},
+                source_tool="index_get_page_content",
+            )
+            evidence = (session.registry.get(cite_uid),)
+        else:
+            evidence = ()
+        updates = tuple(
+            replace(
+                requirement,
+                status="supported" if requirement.id == current.id else "unresolved",
+                cite_uids=(cite_uid,) if requirement.id == current.id else (),
+                gap_reason="" if requirement.id == current.id else "still open",
+            )
+            for requirement in targets
+        )
+        remaining = any(item.status != "supported" for item in updates)
+        return SimpleNamespace(
+            outcome=RetrievalOutcome(
+                status="partial" if remaining else "sufficient",
+                items=(CitableItem(cite_uid, 1.0),),
+                note="",
+                evidence=evidence,
+                requirements=updates,
+                model_rounds=1,
+                mcp_calls=1,
+            ),
+            diagnostics={"stop_reason": "partial" if remaining else "finalized"},
             l2_calls=1,
             usage={},
         )
@@ -285,8 +328,8 @@ class DriverTests(unittest.TestCase):
             deadline=Deadline.after(3),
         )
 
-        self.assertEqual(run.outcome.status, "partial")
-        self.assertEqual(run.outcome.evidence[0].cite_uid, "cite-guideline")
+        self.assertEqual(run.outcome.status, "no_evidence")
+        self.assertFalse(run.outcome.evidence)
         self.assertEqual(run.l2_calls, 1)
         self.assertEqual([call[0] for call in mcp.calls[:2]], [
             "index_get_relevant_nodes",
@@ -381,8 +424,8 @@ class DriverTests(unittest.TestCase):
             "self-contained guideline question",
             deadline=Deadline.after(3),
         )
-        self.assertEqual(run.outcome.status, "partial")
-        self.assertEqual(run.outcome.evidence[0].cite_uid, "cite-guideline")
+        self.assertEqual(run.outcome.status, "no_evidence")
+        self.assertFalse(run.outcome.evidence)
 
     def test_retrieval_failure_still_returns_final_l2_answer(self) -> None:
         settings = Settings(
@@ -413,7 +456,7 @@ class DriverTests(unittest.TestCase):
         result = driver.complete(
             ChatCompletionRequest(
                 model=settings.model,
-                messages=({"role": "user", "content": "이 약의 허가 적응증은?"},),
+                messages=({"role": "user", "content": "와파린의 허가 적응증은?"},),
             ),
             request_id="req-retrieval-failure",
         )
@@ -459,7 +502,7 @@ class DriverTests(unittest.TestCase):
         result = driver.complete(
             ChatCompletionRequest(
                 model=settings.model,
-                messages=({"role": "user", "content": "이 약의 허가 적응증은?"},),
+                messages=({"role": "user", "content": "와파린의 허가 적응증은?"},),
             ),
             request_id="req-retrieval-budget",
         )
@@ -521,6 +564,76 @@ class DriverTests(unittest.TestCase):
         )
         self.assertEqual(len(retrieval.requirements), 2)
 
+    def test_multiple_retrievals_share_one_cumulative_session(self) -> None:
+        settings = Settings(
+            lunit_fm_api_key="test",
+            max_generation_retrievals=2,
+            review_policy="off",
+        )
+        l2 = ScriptedL2(
+            [
+                l2_tool_call(
+                    "first",
+                    "retrieve_relevant_content",
+                    {
+                        "query": "CKD blood pressure target",
+                        "requirements": [
+                            {"id": "first", "claim_or_question": "target", "criticality": "critical"}
+                        ],
+                    },
+                ),
+                l2_tool_call(
+                    "second",
+                    "retrieve_relevant_content",
+                    {
+                        "query": "CKD albuminuria recommendation",
+                        "requirements": [
+                            {"id": "second", "claim_or_question": "albuminuria", "criticality": "critical"}
+                        ],
+                    },
+                ),
+                l2_content("merged grounded answer"),
+            ]
+        )
+        retrieval = CumulativeRetrieval()
+        driver = ConversationDriver(settings, l2=l2, retrieval=retrieval)  # type: ignore[arg-type]
+
+        result = driver.complete(
+            ChatCompletionRequest(
+                model=settings.model,
+                messages=(
+                    {
+                        "role": "user",
+                        "content": (
+                            "What is the current CKD blood pressure target, and what does the "
+                            "guideline recommend for albuminuria?"
+                        ),
+                    },
+                ),
+            ),
+            request_id="req-cumulative",
+        )
+
+        self.assertEqual(retrieval.target_ids[0], ("plan-1", "plan-2"))
+        self.assertEqual(retrieval.target_ids[1], ("plan-2",))
+        self.assertEqual(result.trace["requirements_supported"], 2)
+        self.assertEqual(result.trace["requirements_unresolved"], 0)
+        self.assertEqual(result.trace["evidence_count"], 2)
+        final_tool_payloads = [
+            json.loads(message["content"])
+            for message in l2.calls[2]["messages"]
+            if message.get("role") == "tool"
+        ]
+        self.assertEqual(len(final_tool_payloads), 2)
+        self.assertEqual(
+            {item["cite_uid"] for item in final_tool_payloads[-1]["evidence"]},
+            {"cite-plan-1", "cite-plan-2"},
+        )
+        self.assertEqual(
+            {item["status"] for item in final_tool_payloads[-1]["requirements"]},
+            {"supported"},
+        )
+
     def test_post_retrieval_recovery_packet_preserves_grounding(self) -> None:
         settings = Settings(
             lunit_fm_api_key="test",
@@ -562,7 +675,7 @@ class DriverTests(unittest.TestCase):
 
         recovery_packet = json.loads(l2.calls[1]["recovery_messages"][-1]["content"])
         self.assertEqual(len(recovery_packet["grounding_payloads"]), 1)
-        self.assertIn('"status":"partial"', recovery_packet["grounding_payloads"][0])
+        self.assertIn('"status":"no_evidence"', recovery_packet["grounding_payloads"][0])
         self.assertIn("requirements", recovery_packet["grounding_payloads"][0])
 
     def test_disabling_high_risk_review_does_not_disable_evidence_review(self) -> None:
