@@ -18,8 +18,13 @@ class SettingsTests(unittest.TestCase):
     def test_defaults_favor_family_routing_and_tighter_retrieval_budgets(self) -> None:
         settings = Settings.from_env({})
         self.assertEqual(settings.mcp_tool_mode, "family")
-        self.assertEqual(settings.max_retrieval_model_rounds, 3)
-        self.assertEqual(settings.max_mcp_tool_calls, 4)
+        self.assertEqual(settings.l2_timeout_sec, 60.0)
+        self.assertEqual(settings.l2_retries, 0)
+        self.assertEqual(settings.empty_output_retries, 0)
+        self.assertEqual(settings.l2_max_tokens, 4_096)
+        self.assertEqual(settings.retrieval_timeout_sec, 30.0)
+        self.assertEqual(settings.max_retrieval_model_rounds, 2)
+        self.assertEqual(settings.max_mcp_tool_calls, 3)
         self.assertEqual(settings.max_tool_result_chars, 8_000)
         self.assertEqual(settings.max_evidence_items, 4)
         self.assertEqual(settings.max_evidence_chars, 8_000)
@@ -43,7 +48,7 @@ class SettingsTests(unittest.TestCase):
         )
         self.assertEqual(settings.host, "0.0.0.0")
         self.assertEqual(settings.port, 8000)
-        self.assertEqual(settings.l2_timeout_sec, 40.0)
+        self.assertEqual(settings.l2_timeout_sec, 60.0)
         self.assertEqual(settings.mcp_tool_mode, "family")
 
     def test_invalid_mode_is_rejected(self) -> None:
