@@ -295,11 +295,13 @@ class ConversationDriver:
         compiled: CompiledConversation,
         outcome: RetrievalOutcome | None,
     ) -> bool:
-        # Measured on 157 requests: the audit fired on 82% of them and changed the answer
-        # on 18% of those, and the score was identical with it off (0.4946 vs 0.4944) —
-        # what it added to completeness it took back off accuracy. It cost 60% of our
-        # latency, and latency is what kills a run on the official harness. Off by default;
-        # the flag stays so the experiment can be repeated.
+        # Measured both ways on the same 150 samples: the score is a tie (0.4946 off vs
+        # 0.4944 on). The audit buys 0.045 of completeness and gives back accuracy,
+        # context and instruction-following in almost exactly the same weight. It is kept
+        # on because that is the configuration that scored 48.47 on the official harness,
+        # and a tie is no reason to move away from a measured number. It does cost 60% of
+        # our latency, so ENABLE_HIGH_RISK_REVIEW=false is the lever if a run is at risk
+        # of running out its time budget.
         return self._settings.enable_high_risk_review
 
     def _review(
