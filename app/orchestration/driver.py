@@ -14,7 +14,12 @@ from app.deadline import Deadline
 from app.errors import AppError, UpstreamError
 from app.evidence.models import RetrievalOutcome
 from app.orchestration.retrieval import RetrievalEngine
-from app.prompts import GENERATION_SYSTEM_PROMPT, REVIEW_SYSTEM_PROMPT, REVISION_SYSTEM_PROMPT
+from app.prompts import (
+    GENERATION_AFTER_RETRIEVAL_PROMPT,
+    GENERATION_SYSTEM_PROMPT,
+    REVIEW_SYSTEM_PROMPT,
+    REVISION_SYSTEM_PROMPT,
+)
 
 
 LOGGER = logging.getLogger("lunit_driver")
@@ -100,6 +105,14 @@ class ConversationDriver:
         mcp_calls = 0
         last_outcome: RetrievalOutcome | None = None
         draft = ""
+        retrieval_closed_prompt_added = False
+
+        if self._settings.max_generation_retrievals == 0:
+            messages.insert(
+                1,
+                {"role": "system", "content": GENERATION_AFTER_RETRIEVAL_PROMPT},
+            )
+            retrieval_closed_prompt_added = True
 
         max_rounds = self._settings.max_generation_retrievals + 2
         for _ in range(max_rounds):
@@ -184,14 +197,20 @@ class ConversationDriver:
                     {"role": "tool", "tool_call_id": call.id, "content": content}
                 )
 
+            if (
+                retrieval_count >= self._settings.max_generation_retrievals
+                and not retrieval_closed_prompt_added
+            ):
+                messages.append(
+                    {"role": "system", "content": GENERATION_AFTER_RETRIEVAL_PROMPT}
+                )
+                retrieval_closed_prompt_added = True
+
         if not draft:
             messages.append(
                 {
                     "role": "system",
-                    "content": (
-                        "The generation tool budget is closed. Produce the final user-facing answer "
-                        "now using the conversation and any supplied evidence."
-                    ),
+                    "content": GENERATION_AFTER_RETRIEVAL_PROMPT,
                 }
             )
             response = self._l2.complete(messages, deadline=deadline, tools=None)

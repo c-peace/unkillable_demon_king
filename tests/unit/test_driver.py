@@ -19,18 +19,58 @@ class FakeMcp:
     def list_tools(self, *, deadline):
         return (
             McpTool(
+                "index_get_relevant_nodes",
+                "Find candidate guideline nodes",
+                {
+                    "type": "object",
+                    "properties": {
+                        "corpus_tag": {"type": "string"},
+                        "query": {"type": "string"},
+                    },
+                    "required": ["corpus_tag", "query"],
+                },
+            ),
+            McpTool(
                 "index_get_page_content",
                 "Read selected guideline pages",
                 {
                     "type": "object",
-                    "properties": {"doc_id": {"type": "string"}},
-                    "required": ["doc_id"],
+                    "properties": {
+                        "corpus_tag": {"type": "string"},
+                        "doc_id": {"type": "string"},
+                        "start_page": {"type": "integer"},
+                        "end_page": {"type": "integer"},
+                    },
+                    "required": ["corpus_tag", "doc_id", "start_page", "end_page"],
                 },
             ),
         )
 
     def call_tool(self, name, arguments, *, deadline):
         self.calls.append((name, arguments))
+        if name == "index_get_relevant_nodes":
+            return {
+                "structuredContent": {
+                    "corpus_tag": arguments.get("corpus_tag", "guideline"),
+                    "matching_document": {
+                        "doc_id": "guideline-1",
+                        "title": "Clinical Guideline",
+                        "range": [10, 12],
+                    },
+                }
+            }
+        if name == "index_get_page_content":
+            return {
+                "structuredContent": {
+                    "cite_uid": "cite-guideline",
+                    "title": "Clinical Guideline",
+                    "content": "The guideline supports the stated action.",
+                    "pages": [
+                        {"page": 10, "text": "The guideline supports the stated action."},
+                        {"page": 11, "text": "More supporting text."},
+                    ],
+                }
+            }
         return {
             "content": [
                 {
@@ -124,9 +164,51 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(result.trace["retrieval_status"], "sufficient")
         self.assertEqual(result.trace["evidence_count"], 1)
         self.assertEqual(len(mcp.calls), 1)
-        tool_message = generation_l2.calls[1]["messages"][-1]
+        tool_message = next(
+            message
+            for message in generation_l2.calls[1]["messages"]
+            if message.get("role") == "tool"
+        )
         self.assertIn("cite-guideline", tool_message["content"])
+        self.assertTrue(
+            any(
+                message.get("role") == "system"
+                and "Retrieval is complete" in str(message.get("content", ""))
+                for message in generation_l2.calls[1]["messages"]
+            )
+        )
         self.assertIn("최종 L2 답변", result.content)
+
+    def test_guideline_relevant_nodes_auto_transitions_to_page_content(self) -> None:
+        settings = Settings(lunit_fm_api_key="test", max_retrieval_model_rounds=3)
+        retrieval_l2 = ScriptedL2(
+            [
+                l2_tool_call(
+                    "mcp-call",
+                    "index_get_relevant_nodes",
+                    {"corpus_tag": "guideline", "query": "CKD 혈압 목표"},
+                )
+            ]
+        )
+        mcp = FakeMcp()
+        retrieval = RetrievalEngine(settings, l2=retrieval_l2, mcp=mcp)  # type: ignore[arg-type]
+
+        run = retrieval.run(
+            "CKD 혈압 목표 guideline",
+            deadline=Deadline.after(3),
+        )
+
+        self.assertEqual(run.outcome.status, "partial")
+        self.assertEqual(run.outcome.evidence[0].cite_uid, "cite-guideline")
+        self.assertEqual(run.l2_calls, 1)
+        self.assertEqual([call[0] for call in mcp.calls[:2]], [
+            "index_get_relevant_nodes",
+            "index_get_page_content",
+        ])
+        self.assertEqual(mcp.calls[1][1]["corpus_tag"], "guideline")
+        self.assertEqual(mcp.calls[1][1]["doc_id"], "guideline-1")
+        self.assertEqual(mcp.calls[1][1]["start_page"], 10)
+        self.assertEqual(mcp.calls[1][1]["end_page"], 12)
 
     def test_high_risk_review_can_request_one_revision(self) -> None:
         settings = Settings(
@@ -208,7 +290,11 @@ class DriverTests(unittest.TestCase):
             request_id="req-retrieval-failure",
         )
         self.assertEqual(result.content, "근거가 제한적이지만 안전 중심으로 답변합니다.")
-        tool_message = generation_l2.calls[1]["messages"][-1]
+        tool_message = next(
+            message
+            for message in generation_l2.calls[1]["messages"]
+            if message.get("role") == "tool"
+        )
         self.assertIn('"status": "no_evidence"', tool_message["content"])
 
 
