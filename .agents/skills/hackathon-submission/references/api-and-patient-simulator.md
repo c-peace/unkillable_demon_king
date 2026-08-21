@@ -2,7 +2,7 @@
 
 Last updated: 2026-08-21
 
-Source: organizer "Build with Lunit API" and Patient Simulator screenshots supplied by the user on 2026-08-21.
+Source: organizer "Build with Lunit API" and Patient Simulator screenshots, plus the organizer text copied by the user on 2026-08-21.
 
 ## Service endpoints
 
@@ -53,7 +53,20 @@ Minimal logical request:
 }
 ```
 
-The guide contains an advanced Chat Completions tool-calling section, but its details were not included in the supplied screenshot. Do not invent tool schemas or assume complete OpenAI compatibility until that material is provided or endpoint behavior is verified.
+The organizer material supplied so far contains the heading for advanced Chat Completions tool calling, but not the expanded parameter documentation. The development endpoint behavior below was therefore verified directly rather than inferred from the heading.
+
+## Live development observations
+
+Observed on 2026-08-21 using a runtime-injected team credential. No credential value, raw authorization header, or sensitive prompt content was retained.
+
+- A basic non-streaming Chat Completions request returned HTTP `200`, model `Lunit/L2-preview`, a non-empty `choices[0].message.content`, and token usage.
+- The endpoint accepted the standard OpenAI `tools` array and a forced function `tool_choice`.
+- The assistant message returned a standard `tool_calls` array whose function contained `name` and JSON-encoded `arguments`.
+- A second request containing the original assistant `tool_calls` message followed by a `role: "tool"` result produced a non-empty final assistant response. The current harness adapter is compatible with this continuation contract.
+- The tool-call response used `finish_reason: "stop"` even though `message.tool_calls` was present. Harness logic must branch on `message.tool_calls`, not require `finish_reason == "tool_calls"`.
+- Observed response message keys included `role`, `content`, `tool_calls`, `function_call`, `reasoning`, `refusal`, `annotations`, and `audio`. Only the fields required by the harness should be consumed.
+
+These observations confirm the non-streaming standard tool-call path used by this project. They do not establish support for streaming tool-call deltas, parallel calls, every optional generation parameter, or future endpoint versions.
 
 ## Patient Simulator role contract
 
@@ -110,8 +123,9 @@ Append the exact received simulator question and the harness answer, then resend
 
 ## Suggested development checks
 
-- [ ] Basic L2 request succeeds with runtime-injected credentials.
-- [ ] API key is redacted from logs and error messages.
+- [x] Basic L2 request succeeds with runtime-injected credentials.
+- [x] Standard non-streaming tool request, tool-call parsing, tool-result continuation, and final content are compatible with the harness.
+- [x] API key is redacted from the recorded probe output, logs, and documentation.
 - [ ] Patient Simulator produces a first Korean medical question from empty history.
 - [ ] The harness answers as `assistant` and sends the complete unmodified history for follow-ups.
 - [ ] A three-turn simulated conversation completes without role inversion or duplicated history.
@@ -120,9 +134,9 @@ Append the exact received simulator question and the harness answer, then resend
 
 ## Still unresolved
 
-- Full advanced tool-calling payload and response examples
 - Rate limits, concurrency limits, request timeout, and retry headers
 - Whether model and simulator expose `GET /v1/models`
 - Maximum message/context size and supported generation parameters
+- Streaming, parallel tool-call, and structured-output behavior
 - API-key injection mechanism in official evaluation
-- MCP evaluation-time connectivity and exact per-tool schemas
+- Patient Simulator live behavior in the current development environment
