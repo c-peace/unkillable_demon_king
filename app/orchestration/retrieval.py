@@ -100,6 +100,210 @@ def _tool_cache_key(name: str, arguments: Mapping[str, Any]) -> str:
     )
 
 
+def _candidate_records(value: Any) -> tuple[Mapping[str, Any], ...]:
+    """Extract ranked index records from MCP JSON or text-block envelopes."""
+    records: list[Mapping[str, Any]] = []
+
+    def visit(candidate: Any, depth: int = 0) -> None:
+        if depth > 5:
+            return
+        if isinstance(candidate, str):
+            text = candidate.strip()
+            if not text.startswith(("{", "[")):
+                return
+            try:
+                visit(json.loads(text), depth + 1)
+            except json.JSONDecodeError:
+                return
+            return
+        if isinstance(candidate, list):
+            for item in candidate:
+                visit(item, depth + 1)
+            return
+        if not isinstance(candidate, Mapping):
+            return
+
+        if any(
+            isinstance(candidate.get(key), str)
+            for key in ("doc_id", "document_id", "docId")
+        ):
+            records.append(candidate)
+        for key in (
+            "structuredContent",
+            "structured_content",
+            "result",
+            "items",
+            "item",
+            "nodes",
+            "node",
+            "documents",
+            "document",
+            "matching_document",
+            "matched_document",
+            "matches",
+            "match",
+            "candidate",
+            "candidates",
+            "children",
+            "ancestor_nodes",
+            "ancestorNodes",
+            "content",
+            "data",
+            "results",
+            "rows",
+        ):
+            nested = candidate.get(key)
+            if nested is not None:
+                visit(nested, depth + 1)
+        text = candidate.get("text")
+        if isinstance(text, str):
+            visit(text, depth + 1)
+
+    visit(value)
+    unique: list[Mapping[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for record in records:
+        identity = (str(record.get("doc_id", "")), str(record.get("node_id", "")))
+        if identity in seen:
+            continue
+        seen.add(identity)
+        unique.append(record)
+    return tuple(unique)
+
+
+def _page_number(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 1 else None
+    if isinstance(value, str) and value.isdigit():
+        parsed = int(value)
+        return parsed if parsed >= 1 else None
+    return None
+
+
+def _index_page_arguments(
+    result: Any,
+    discovery_arguments: Mapping[str, Any],
+    page_tool: McpTool,
+) -> dict[str, Any] | None:
+    properties = page_tool.input_schema.get("properties", {})
+    if not isinstance(properties, Mapping):
+        properties = {}
+    for record in _candidate_records(result):
+        doc_id = next(
+            (
+                record.get(key)
+                for key in ("doc_id", "document_id", "docId")
+                if isinstance(record.get(key), str)
+            ),
+            None,
+        )
+        if not isinstance(doc_id, str) or not doc_id.strip():
+            continue
+        corpus_tag = next(
+            (
+                record.get(key)
+                for key in ("corpus_tag", "source_type", "source", "data_source")
+                if isinstance(record.get(key), str) and record.get(key).strip()
+            ),
+            None,
+        )
+        page_range = record.get(
+            "range",
+            record.get("page_range", record.get("pages", record.get("pageRange"))),
+        )
+        start = record.get(
+            "start_page",
+            record.get("page_start", record.get("begin_page", record.get("from_page"))),
+        )
+        end = record.get(
+            "end_page",
+            record.get("page_end", record.get("last_page", record.get("to_page"))),
+        )
+        if isinstance(page_range, (list, tuple)) and len(page_range) >= 2:
+            start, end = page_range[0], page_range[1]
+        elif isinstance(page_range, Mapping):
+            start = page_range.get("start", start)
+            end = page_range.get("end", end)
+        elif isinstance(page_range, str):
+            match = re.fullmatch(r"\s*(\d+)\s*[-~]\s*(\d+)\s*", page_range)
+            if match:
+                start, end = match.group(1), match.group(2)
+        start_page = _page_number(start)
+        end_page = _page_number(end)
+        if start_page is None or end_page is None or end_page < start_page:
+            continue
+        end_page = min(end_page, start_page + 19)
+        arguments: dict[str, Any] = {"doc_id": doc_id.strip()}
+        if "corpus_tag" in properties:
+            if not isinstance(corpus_tag, str) or not corpus_tag.strip():
+                corpus_tag = discovery_arguments.get("corpus_tag")
+            if not isinstance(corpus_tag, str) or not corpus_tag.strip():
+                return None
+            arguments["corpus_tag"] = corpus_tag.strip()
+        if "range" in properties:
+            arguments["range"] = [start_page, end_page]
+            return arguments
+        if "start_page" in properties:
+            arguments["start_page"] = start_page
+        elif "page_start" in properties:
+            arguments["page_start"] = start_page
+        else:
+            return None
+        if "end_page" in properties:
+            arguments["end_page"] = end_page
+        elif "page_end" in properties:
+            arguments["page_end"] = end_page
+        else:
+            return None
+        return arguments
+    return None
+
+
+def _compact_candidates(value: Any, limit: int = 3) -> list[dict[str, Any]]:
+    compact: list[dict[str, Any]] = []
+    fields = (
+        "doc_id",
+        "node_id",
+        "title",
+        "doc_title",
+        "range",
+        "provider",
+        "source_url",
+        "score",
+        "summary",
+    )
+    for record in _candidate_records(value)[:limit]:
+        item = {key: record[key] for key in fields if key in record}
+        summary = item.get("summary")
+        if isinstance(summary, str) and len(summary) > 800:
+            item["summary"] = summary[:800] + "…"
+        compact.append(item)
+    return compact
+
+
+def _registered_evidence_payload(
+    registry: EvidenceRegistry,
+    cite_uids: tuple[str, ...],
+) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for cite_uid in cite_uids:
+        item = registry.get(cite_uid)
+        if item is None:
+            continue
+        records.append(
+            {
+                "cite_uid": item.cite_uid,
+                "title": item.title,
+                "url": item.url,
+                "source_type": item.source_type,
+                "content": (item.content or item.raw_preview)[:4_000],
+            }
+        )
+    return records
+
+
 def _retrieval_user_message(
     query: str,
     *,
@@ -113,8 +317,9 @@ def _retrieval_user_message(
     if {"index_get_relevant_nodes", "index_get_page_content"}.issubset(selected_names):
         index_path = (
             "For an indexed guideline or HIRA question, call index_get_relevant_nodes once "
-            "with node_id null, then call index_get_page_content with the best returned doc_id "
-            "and page range. Do not repeat document discovery with reformulated queries.\n"
+            "with the appropriate corpus_tag and query. The harness will automatically fetch "
+            "page content for the best returned document when a page range is available, so "
+            "do not repeat document discovery with reformulated queries.\n"
         )
     return (
         "Retrieve evidence for this self-contained question:\n"
@@ -185,8 +390,9 @@ class RetrievalEngine:
             ",".join(tool.name for tool in selected_tools),
         )
         tool_by_name = {tool.name: tool for tool in selected_tools}
-        openai_tools = [tool.as_openai_tool() for tool in selected_tools]
-        openai_tools.append(FINALIZE_RETRIEVAL_TOOL)
+        page_content_tool = tool_by_name.get("index_get_page_content")
+        retrieval_tools = [tool.as_openai_tool() for tool in selected_tools]
+        retrieval_tools.append(FINALIZE_RETRIEVAL_TOOL)
 
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": RETRIEVAL_SYSTEM_PROMPT},
@@ -209,7 +415,17 @@ class RetrievalEngine:
         while model_rounds < self._settings.max_retrieval_model_rounds:
             if not deadline.can_start(0.25):
                 break
-            response = self._l2.complete(messages, deadline=deadline, tools=openai_tools)
+            round_tools = (
+                [FINALIZE_RETRIEVAL_TOOL]
+                if len(registry)
+                else retrieval_tools
+            )
+            allowed_tool_names = {
+                tool["function"]["name"]
+                for tool in round_tools
+                if isinstance(tool.get("function"), Mapping)
+            }
+            response = self._l2.complete(messages, deadline=deadline, tools=round_tools)
             model_rounds += 1
             _sum_usage(usage, response.usage)
             messages.append(response.assistant_message)
@@ -235,6 +451,23 @@ class RetrievalEngine:
 
             should_stop_after_turn = False
             for call in response.tool_calls:
+                if call.name not in allowed_tool_names:
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": call.id,
+                            "content": json.dumps(
+                                {
+                                    "error": "tool_not_available_in_current_retrieval_phase",
+                                    "instruction": (
+                                        "Use only the tools currently provided. If citable evidence "
+                                        "is available, call finalize_retrieval."
+                                    ),
+                                }
+                            ),
+                        }
+                    )
+                    continue
                 if call.name == "finalize_retrieval":
                     try:
                         arguments = parse_tool_arguments(call.arguments)
@@ -327,10 +560,103 @@ class RetrievalEngine:
                         mcp_calls,
                         len(cite_uids),
                     )
-                    tool_content = {
-                        "result": result,
-                        "registered_cite_uids": list(cite_uids),
-                    }
+                    if tool.name == "index_get_page_content" and cite_uids:
+                        tool_content = {
+                            "registered_cite_uids": list(cite_uids),
+                            "evidence": _registered_evidence_payload(registry, cite_uids),
+                            "instruction": "Call finalize_retrieval with the relevant cite_uids.",
+                        }
+                    elif tool.name == "index_get_relevant_nodes":
+                        tool_content = {
+                            "registered_cite_uids": list(cite_uids),
+                            "candidates": _compact_candidates(result),
+                        }
+                    else:
+                        tool_content = {
+                            "registered_cite_uids": list(cite_uids),
+                            "result": result,
+                        }
+
+                    if (
+                        tool.name == "index_get_relevant_nodes"
+                        and not cite_uids
+                        and page_content_tool is not None
+                        and mcp_calls < self._settings.max_mcp_tool_calls
+                    ):
+                        page_arguments = _index_page_arguments(
+                            result,
+                            arguments,
+                            page_content_tool,
+                        )
+                        if page_arguments is not None:
+                            page_cache_key = _tool_cache_key(
+                                page_content_tool.name,
+                                page_arguments,
+                            )
+                            try:
+                                page_result = self._mcp.call_tool(
+                                    page_content_tool.name,
+                                    page_arguments,
+                                    deadline=deadline,
+                                )
+                                mcp_calls += 1
+                                page_cite_uids = registry.register_payload(
+                                    page_result,
+                                    source_tool=page_content_tool.name,
+                                )
+                                LOGGER.info(
+                                    "retrieval_tool_completed tool=%s call=%s citations=%s auto=true",
+                                    page_content_tool.name,
+                                    mcp_calls,
+                                    len(page_cite_uids),
+                                )
+                                page_payload = {
+                                    "registered_cite_uids": list(page_cite_uids),
+                                    "evidence": _registered_evidence_payload(
+                                        registry,
+                                        page_cite_uids,
+                                    ),
+                                    "instruction": (
+                                        "Citable page evidence is ready. Call finalize_retrieval "
+                                        "with the relevant cite_uids."
+                                    ),
+                                }
+                                page_rendered = _tool_result_content(
+                                    page_payload,
+                                    self._settings.max_tool_result_chars,
+                                )
+                                tool_cache[page_cache_key] = page_rendered
+                                tool_content.update(page_payload)
+                                tool_content["auto_page_read"] = True
+                                if page_cite_uids:
+                                    return RetrievalRun(
+                                        outcome=fallback_selection(
+                                            registry=registry,
+                                            query=query,
+                                            note=(
+                                                "Citable indexed page evidence was collected by "
+                                                "the deterministic retrieval bridge."
+                                            ),
+                                            model_rounds=model_rounds,
+                                            mcp_calls=mcp_calls,
+                                            max_items=self._settings.max_evidence_items,
+                                        ),
+                                        usage=usage,
+                                        l2_calls=model_rounds,
+                                    )
+                            except AppError as exc:
+                                mcp_calls += 1
+                                LOGGER.warning(
+                                    "retrieval_tool_failed tool=%s call=%s code=%s auto=true",
+                                    page_content_tool.name,
+                                    mcp_calls,
+                                    exc.code,
+                                )
+                                tool_content["auto_page_read"] = False
+                                tool_content["instruction"] = (
+                                    "The page read was unavailable. Select another evidence path "
+                                    "or finalize with partial/no_evidence."
+                                )
                 except AppError as exc:
                     mcp_calls += 1
                     LOGGER.warning(
