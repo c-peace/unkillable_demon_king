@@ -18,7 +18,6 @@ from app.errors import AppError, UpstreamError
 from app.evidence.models import RetrievalOutcome
 from app.orchestration.retrieval import RetrievalEngine
 from app.prompts import (
-    ASK_ONE_PROMPT,
     GENERATION_AFTER_RETRIEVAL_PROMPT,
     generation_system_prompt,
     REVIEW_SYSTEM_PROMPT,
@@ -120,7 +119,6 @@ class ConversationDriver:
         ]
         if contract.is_multipart:
             messages.append({"role": "system", "content": contract.as_prompt()})
-        messages.append({"role": "system", "content": ASK_ONE_PROMPT})
         usage: dict[str, int] = {}
         l2_calls = 0
         retrieval_count = 0

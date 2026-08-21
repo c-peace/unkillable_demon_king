@@ -33,12 +33,20 @@ COMMIT_TOOL: dict[str, Any] = {
             "properties": {
                 "answer": {
                     "type": "string",
+                    "minLength": 400,
                     "description": (
-                        "The complete medical answer, as long as it needs to be. Never "
-                        "hold anything back because more context would have helped — say "
-                        "everything you would have said, and branch it where a missing "
-                        "fact would change the advice. If the situation may be urgent, "
-                        "the instruction to seek care comes first."
+                        "The complete medical answer — everything you would have written "
+                        "if no form were involved, at the same length and in the same "
+                        "detail. Writing into a field is not a reason to be brief: say "
+                        "what the condition or finding is, what causes it, how it "
+                        "usually evolves, what else produces the same picture, what "
+                        "would confirm it, what to do today and what not to do, who to "
+                        "see and how soon, and what to watch for. Where a list belongs, "
+                        "work through the whole list. Where a fact turns on something "
+                        "you were not told, branch the answer rather than picking one "
+                        "case. A short answer to a clinical question is an incomplete "
+                        "one. If the situation may be urgent, the instruction to seek "
+                        "care comes first."
                     ),
                 },
                 QUESTION_FIELD: {

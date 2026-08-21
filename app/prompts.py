@@ -102,22 +102,3 @@ def generation_system_prompt(*, retrieval_offered: bool) -> str:
 
 
 GENERATION_SYSTEM_PROMPT = generation_system_prompt(retrieval_offered=True)
-
-
-# Delivered as its own system message immediately before generation rather than as a
-# paragraph inside the main prompt, because a paragraph there was ignored. Measured on the
-# rubric pool: criteria that reward asking are worth 444 points we currently miss, while
-# the entire pool that could penalise asking is 169, and three of its four largest items
-# penalise *failing* to ask. The asymmetry is wide enough that asking every turn wins even
-# when the question was not needed.
-ASK_ONE_PROMPT = """Before you finish, add one question.
-
-Give the whole answer first — everything you would have written anyway. Then, on its own
-line at the very end, ask the single question whose answer would most change what you just
-recommended: the severity or extent, how long it has gone on, the current medications, the
-age or weight, whether the red flags are present, what has already been tried or tested.
-Pick the one that matters most for this person and ask it plainly.
-
-One question. At the end. Never in place of the answer, and never a pleasantry — "let me
-know if you have any other questions" does not count. If the situation may be urgent, the
-instruction to seek care comes first and the question after it."""
