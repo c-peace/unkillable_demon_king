@@ -134,6 +134,43 @@ def _strip_particle(token: str) -> str:
     return token
 
 
+def _semantic_tokens(name: str, arguments: Mapping[str, Any]) -> tuple[str, frozenset[str]]:
+    """The tool and the content words its arguments actually carry."""
+    tokens: set[str] = set()
+    for key in sorted(arguments):
+        value = arguments[key]
+        if isinstance(value, str):
+            for raw in re.split(r"[^0-9a-z가-힣]+", value.lower()):
+                stem = _strip_particle(raw)
+                if stem and stem not in _STOPWORDS and len(stem) > 1:
+                    tokens.add(stem)
+        elif value is not None:
+            tokens.add(f"{key}={value}")
+    return name, frozenset(tokens)
+
+
+def _is_near_duplicate(
+    candidate: tuple[str, frozenset[str]],
+    seen: list[tuple[str, frozenset[str]]],
+    threshold: float = 0.85,
+) -> bool:
+    """Whether this search is a rewording of one already run.
+
+    Exact token-set equality misses "warfarin interaction" against "warfarin ibuprofen
+    interaction", which is the same enquiry with one word added, so compare by overlap.
+    """
+    name, tokens = candidate
+    if not tokens:
+        return False
+    for seen_name, seen_tokens in seen:
+        if seen_name != name or not seen_tokens:
+            continue
+        union = len(tokens | seen_tokens)
+        if union and len(tokens & seen_tokens) / union >= threshold:
+            return True
+    return False
+
+
 def _semantic_call_key(name: str, arguments: Mapping[str, Any]) -> str:
     """Collapse a tool call to what it is actually asking for.
 
@@ -471,7 +508,7 @@ class RetrievalEngine:
         # The deterministic page bridge is our own chaining, not the model spending its
         # budget, so it is counted separately and reported without charging the model.
         bridge_calls = 0
-        seen_semantic: set[str] = set()
+        seen_semantic: list[tuple[str, frozenset[str]]] = []
         duplicate_blocked = 0
         invalid_calls = 0
         no_progress = 0
@@ -648,7 +685,8 @@ class RetrievalEngine:
                         }
                     )
                     continue
-                if semantic_key in seen_semantic:
+                semantic_tokens = _semantic_tokens(tool.name, arguments)
+                if _is_near_duplicate(semantic_tokens, seen_semantic):
                     # Same search, different wording. Running it again costs a tool call and
                     # returns what we already hold, so refuse and push toward finalizing.
                     duplicate_blocked += 1
@@ -675,7 +713,7 @@ class RetrievalEngine:
                         }
                     )
                     continue
-                seen_semantic.add(semantic_key)
+                seen_semantic.append(semantic_tokens)
                 try:
                     result = self._mcp.call_tool(
                         tool.name,
@@ -857,12 +895,19 @@ class RetrievalEngine:
             model_rounds, mcp_calls, bridge_calls, duplicate_blocked,
             invalid_calls, no_progress,
         )
-        if mcp_budget_exhausted:
-            note = "Retrieval ended because the MCP tool-call budget was exhausted."
-        elif model_rounds >= self._settings.max_retrieval_model_rounds:
-            note = "Retrieval ended because the retrieval model-round budget was exhausted."
+        # These notes travel to the generation stage and models have been observed relaying
+        # them verbatim to the user, so they say what the evidence amounts to rather than
+        # narrating our internal limits. A reader must never hear about budgets.
+        if len(registry):
+            note = (
+                "The evidence gathered is partial. Use what it supports, and answer the "
+                "rest from established medical knowledge without citing it."
+            )
         else:
-            note = "Retrieval ended at the configured round, tool-call, or time budget."
+            note = (
+                "No citable evidence was gathered for this query. Answer from established "
+                "medical knowledge without citations."
+            )
         return RetrievalRun(
             outcome=fallback_selection(
                 registry=registry,
