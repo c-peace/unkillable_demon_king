@@ -31,7 +31,16 @@ ROUTING_RULES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     ),
     (
         re.compile(
-            r"상호작용|병용|금기|부작용|경고|adverse|interaction|contraindication|warning",
+            # Patients do not say 상호작용 or 금기. They ask whether two medicines can be
+            # taken together, or whether something is safe to take at all, so the natural
+            # phrasings have to route here as well as the clinical vocabulary.
+            r"상호작용|병용|금기|부작용|이상반응|경고|"
+            r"같이\s*(먹|복용|드시|투여)|함께\s*(먹|복용|드시|투여)|동시에\s*(먹|복용)|"
+            r"먹어도\s*(되|괜찮|안전)|복용해도\s*(되|괜찮|안전)|드셔도\s*(되|괜찮)|"
+            r"먹으면\s*안|피해야|위험하지|괜찮을까|안전한가|"
+            r"adverse|interaction|contraindication|warning|safe to take|"
+            r"take\s+(?:\w+\s+){0,3}(?:together|with)|combine|"
+            r"can i (?:take|use|have)|is it (?:ok|okay|safe)",
             re.IGNORECASE,
         ),
         (
@@ -107,6 +116,20 @@ ROUTING_RULES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
 )
 
 
+# The evidence domain each routing rule stands for, in the same order. Traced per request
+# so failures can be read by domain, and the key any per-route tuning would use.
+ROUTE_LABELS: tuple[str, ...] = (
+    "guideline",
+    "drug_safety",
+    "drug",
+    "hira",
+    "coding",
+    "law",
+    "research",
+    "faers",
+)
+
+
 TOOL_PRIORITY: dict[str, int] = {
     "index_list_documents": 10,
     "index_get_relevant_nodes": 11,
@@ -140,6 +163,14 @@ class SourceRouter:
         selected_names = self._match_tool_names(query)
         selected = self._select_names(selected_names, tools)
         return selected or self._select_names(CORE_FALLBACK_TOOL_NAMES, tools) or tuple(tools)
+
+    def routes(self, query: str) -> tuple[str, ...]:
+        """Which evidence domains this query belongs to."""
+        return tuple(
+            label
+            for label, (pattern, _tools) in zip(ROUTE_LABELS, ROUTING_RULES)
+            if pattern.search(query)
+        )
 
     def _match_tool_names(self, query: str) -> tuple[str, ...]:
         matched: list[str] = []
