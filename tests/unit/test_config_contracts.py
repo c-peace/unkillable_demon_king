@@ -54,7 +54,9 @@ class SettingsTests(unittest.TestCase):
     def test_defaults_favor_family_routing_and_iterative_retrieval_budgets(self) -> None:
         settings = Settings.from_env({})
         self.assertEqual(settings.mcp_tool_mode, "family")
-        self.assertEqual(settings.l2_timeout_sec, 90.0)
+        # 150s, not 90s: one generation call is the whole memory lane and the request
+        # budget is 240s, so cutting it at 90s converts a slow answer into a scored zero.
+        self.assertEqual(settings.l2_timeout_sec, 150.0)
         self.assertEqual(settings.l2_retries, 1)
         # Three attempts, because the first re-send of a greedy request is deterministic
         # and reproduces the empty completion exactly. See test_empty_escalation.
@@ -88,7 +90,9 @@ class SettingsTests(unittest.TestCase):
         )
         self.assertEqual(settings.host, "0.0.0.0")
         self.assertEqual(settings.port, 8000)
-        self.assertEqual(settings.l2_timeout_sec, 90.0)
+        # 150s, not 90s: one generation call is the whole memory lane and the request
+        # budget is 240s, so cutting it at 90s converts a slow answer into a scored zero.
+        self.assertEqual(settings.l2_timeout_sec, 150.0)
         self.assertEqual(settings.mcp_tool_mode, "family")
 
     def test_invalid_mode_is_rejected(self) -> None:

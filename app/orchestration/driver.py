@@ -11,7 +11,7 @@ from app.config import Settings
 from app.contracts import ChatCompletionRequest
 from app.conversation import CompiledConversation, compile_conversation
 from app.admission import admit
-from app.commit import COMMIT_TOOL, compose, unpack
+from app.commit import COMMIT_TOOL, applies_to, compose, unpack
 from app.coverage import extract_contract
 from app.deadline import Deadline
 from app.errors import AppError, UpstreamError
@@ -144,7 +144,7 @@ class ConversationDriver:
         # to get that question by instruction failed in English; the schema channel
         # produced it on every case tried. See app/commit.py.
         committed = 0
-        if retrieval_budget == 0:
+        if retrieval_budget == 0 and applies_to(compiled.latest_user_text):
             generation_started = time.monotonic()
             response = self._l2.complete(
                 messages,
@@ -293,7 +293,10 @@ class ConversationDriver:
         revised = False
         # The audit costs one L2 call and the revision a second, so only start it when
         # enough of the request budget is left for both to finish.
-        review_reserve_sec = 2 * self._settings.l2_timeout_sec
+        # One review call plus a margin, not two full timeouts: at a 150s per-call
+        # timeout, reserving 300s can never fit inside the 240s request budget, which
+        # silently disables the audit wherever it is enabled at all.
+        review_reserve_sec = self._settings.l2_timeout_sec + 10.0
         if self._should_review(compiled, last_outcome) and deadline.can_start(
             review_reserve_sec
         ):

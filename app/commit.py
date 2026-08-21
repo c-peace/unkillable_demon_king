@@ -18,6 +18,7 @@ The field name carries the instruction, which is why it is a sentence rather tha
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 
@@ -118,3 +119,17 @@ def compose(answer: str, question: str) -> str:
     if question.rstrip()[-1] not in "?？":
         question = question.rstrip(" .") + "?"
     return f"{answer.rstrip()}\n\n{question}"
+
+
+# The contract is applied where the wall it breaks actually stands. Asked in the system
+# prompt to end with a question, the model already complies in Korean and refuses in
+# English. Measured across languages: English came out a tie overall while gaining 0.070 of
+# context awareness, and non-English lost 0.069 — the structured constraint compresses an
+# answer, and it compresses a non-English answer harder. The held-out evaluation is Korean,
+# so that loss is not one to carry for a gain that only lands in English.
+def applies_to(text: str) -> bool:
+    """Whether this turn should be answered under the commit contract."""
+    letters = [character for character in text or "" if character.isalpha()]
+    if len(letters) < 12:
+        return False
+    return sum(1 for character in letters if character.isascii()) / len(letters) > 0.9
