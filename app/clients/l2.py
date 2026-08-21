@@ -196,6 +196,7 @@ class L2Client:
         *,
         deadline: Deadline,
         tools: Sequence[Mapping[str, Any]] | None = None,
+        tool_choice: str | Mapping[str, Any] | None = None,
     ) -> L2Response:
         key = self._settings.lunit_fm_api_key
         if not key:
@@ -215,7 +216,9 @@ class L2Client:
         }
         if tools:
             payload["tools"] = [dict(tool) for tool in tools]
-            payload["tool_choice"] = "auto"
+            payload["tool_choice"] = (
+                dict(tool_choice) if isinstance(tool_choice, Mapping) else tool_choice or "auto"
+            )
             payload["parallel_tool_calls"] = False
 
         # An empty completion is a real failure mode: on some conversations — vaccine

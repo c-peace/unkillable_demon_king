@@ -15,7 +15,10 @@ from app.evidence.models import (
 )
 from app.orchestration.driver import ConversationDriver
 from app.orchestration.planning import (
+    FORCED_PLAN_TOOL_CHOICE,
+    SUBMIT_RESPONSE_PLAN_TOOL,
     ResponsePlan,
+    StructuredPlanner,
     parse_response_plan,
 )
 from app.orchestration.retrieval import RetrievalEngine
@@ -34,7 +37,8 @@ class SemanticPlanningTests(unittest.TestCase):
         )
         plan = parse_response_plan(
             {
-                "lane": "DIRECT",
+                "response_mode": "ANSWER",
+                "risk_level": "ROUTINE",
                 "clinical_facts": [
                     {
                         "kind": "pregnancy",
@@ -63,10 +67,11 @@ class SemanticPlanningTests(unittest.TestCase):
 
     def test_plan_rejects_nonexistent_source_turn(self) -> None:
         compiled = compile_conversation([{"role": "user", "content": "질문"}])
-        with self.assertRaisesRegex(ValueError, "source turn"):
+        with self.assertRaisesRegex(ValueError, "invalid_source_turns"):
             parse_response_plan(
                 {
-                    "lane": "DIRECT",
+                    "response_mode": "ANSWER",
+                    "risk_level": "ROUTINE",
                     "clinical_facts": [
                         {
                             "kind": "medication",
@@ -82,6 +87,191 @@ class SemanticPlanningTests(unittest.TestCase):
                 },
                 compiled=compiled,
             )
+
+    def test_source_sensitive_answer_requires_evidence_requirement(self) -> None:
+        compiled = compile_conversation(
+            [{"role": "user", "content": "현재 가이드라인 권고를 알려줘."}]
+        )
+        with self.assertRaisesRegex(ValueError, "source_sensitive_without_requirement"):
+            parse_response_plan(
+                {
+                    "response_mode": "ANSWER",
+                    "risk_level": "ROUTINE",
+                    "clinical_facts": [],
+                    "interaction": {
+                        "intent": "guideline answer",
+                        "language": "ko",
+                        "requested_format": "",
+                        "unresolved_references": [],
+                        "strict_format": False,
+                    },
+                    "risk_signals": [],
+                    "missing_information": [],
+                    "evidence_requirements": [],
+                    "answer_obligations": [],
+                },
+                compiled=compiled,
+            )
+
+    def test_planner_forces_tool_and_repairs_one_invalid_plan(self) -> None:
+        compiled = compile_conversation([{"role": "user", "content": "감기는 무엇인가요?"}])
+        l2 = ScriptedL2(
+            [
+                l2_tool_call(
+                    "invalid",
+                    "submit_response_plan",
+                    {"response_mode": "ANSWER", "risk_level": "ROUTINE"},
+                ),
+                l2_tool_call(
+                    "valid",
+                    "submit_response_plan",
+                    {
+                        "response_mode": "ANSWER",
+                        "risk_level": "ROUTINE",
+                        "clinical_facts": [],
+                        "interaction": {
+                            "intent": "explanation",
+                            "language": "ko",
+                            "requested_format": "",
+                            "unresolved_references": [],
+                            "strict_format": False,
+                        },
+                        "risk_signals": [],
+                        "missing_information": [],
+                        "evidence_requirements": [],
+                        "answer_obligations": ["Explain the common cold."],
+                    },
+                ),
+            ]
+        )
+        result = StructuredPlanner(l2=l2).plan(compiled, deadline=Deadline.after(3))
+
+        self.assertEqual(result.mode, "structured_repaired")
+        self.assertEqual(result.l2_calls, 2)
+        self.assertEqual(l2.calls[0]["tool_choice"], FORCED_PLAN_TOOL_CHOICE)
+        self.assertIn("invalid_clinical_facts", l2.calls[1]["messages"][1]["content"])
+
+    def test_planner_bounded_repairs_missing_source_requirement(self) -> None:
+        compiled = compile_conversation(
+            [{"role": "user", "content": "현재 CKD 가이드라인 권고를 알려줘."}]
+        )
+        l2 = ScriptedL2(
+            [
+                l2_tool_call(
+                    "plan",
+                    "submit_response_plan",
+                    {
+                        "response_mode": "ANSWER",
+                        "risk_level": "ROUTINE",
+                        "clinical_facts": [],
+                        "interaction": {
+                            "intent": "guideline answer",
+                            "language": "ko",
+                            "requested_format": "",
+                            "unresolved_references": [],
+                            "strict_format": False,
+                        },
+                        "risk_signals": [],
+                        "missing_information": [],
+                        "evidence_requirements": [],
+                        "answer_obligations": [],
+                    },
+                )
+            ]
+        )
+
+        result = StructuredPlanner(l2=l2).plan(compiled, deadline=Deadline.after(3))
+
+        self.assertEqual(result.mode, "structured_bounded_repair")
+        self.assertEqual(result.error_code, "source_sensitive_without_requirement")
+        self.assertEqual(result.l2_calls, 1)
+        self.assertEqual(result.plan.evidence_requirements[0].source_family, "guideline")
+
+    def test_plan_schema_defines_nested_parser_fields(self) -> None:
+        parameters = SUBMIT_RESPONSE_PLAN_TOOL["function"]["parameters"]
+        fact = parameters["properties"]["clinical_facts"]["items"]
+        requirement = parameters["properties"]["evidence_requirements"]["items"]
+
+        self.assertEqual(
+            set(fact["required"]),
+            {"kind", "value", "source_turns", "negated", "corrected"},
+        )
+        self.assertFalse(fact["additionalProperties"])
+        self.assertIn("question", requirement["required"])
+
+    def test_plan_rejects_string_booleans_in_nested_fields(self) -> None:
+        compiled = compile_conversation([{"role": "user", "content": "질문"}])
+        with self.assertRaisesRegex(ValueError, "invalid_clinical_fact_negated"):
+            parse_response_plan(
+                {
+                    "response_mode": "ANSWER",
+                    "risk_level": "ROUTINE",
+                    "clinical_facts": [
+                        {
+                            "kind": "condition",
+                            "value": "hypertension",
+                            "source_turns": [1],
+                            "negated": "false",
+                            "corrected": False,
+                        }
+                    ],
+                    "interaction": {
+                        "intent": "answer",
+                        "language": "ko",
+                        "requested_format": "",
+                        "unresolved_references": [],
+                        "strict_format": False,
+                    },
+                    "risk_signals": [],
+                    "missing_information": [],
+                    "evidence_requirements": [],
+                    "answer_obligations": [],
+                },
+                compiled=compiled,
+            )
+
+    def test_plan_rejects_empty_control_strings(self) -> None:
+        compiled = compile_conversation([{"role": "user", "content": "질문"}])
+        with self.assertRaisesRegex(ValueError, "invalid_interaction_intent"):
+            parse_response_plan(
+                {
+                    "response_mode": "ANSWER",
+                    "risk_level": "ROUTINE",
+                    "clinical_facts": [],
+                    "interaction": {
+                        "intent": "   ",
+                        "language": "ko",
+                        "requested_format": "",
+                        "unresolved_references": [],
+                        "strict_format": False,
+                    },
+                    "risk_signals": [],
+                    "missing_information": [],
+                    "evidence_requirements": [],
+                    "answer_obligations": [],
+                },
+                compiled=compiled,
+            )
+
+    def test_planner_does_not_start_repair_without_reserved_time(self) -> None:
+        compiled = compile_conversation([{"role": "user", "content": "질문"}])
+        l2 = ScriptedL2(
+            [
+                l2_tool_call(
+                    "invalid",
+                    "submit_response_plan",
+                    {"response_mode": "ANSWER", "risk_level": "ROUTINE"},
+                )
+            ]
+        )
+        result = StructuredPlanner(l2=l2, retry_reserve_sec=10).plan(
+            compiled,
+            deadline=Deadline.after(3),
+        )
+
+        self.assertEqual(result.mode, "legacy_fallback")
+        self.assertEqual(result.l2_calls, 1)
+        self.assertEqual(result.error_code, "invalid_clinical_facts")
 
 
 class RequirementLedgerTests(unittest.TestCase):
@@ -306,6 +496,8 @@ class StructuredReviewTests(unittest.TestCase):
             deadline=Deadline.after(3),
         )
         self.assertEqual(result.status, "review_unavailable")
+        self.assertEqual(result.error_code, "missing_structured_call")
+        self.assertEqual(result.l2_calls, 1)
         self.assertFalse(result.passed)
 
     def test_unknown_citation_is_a_material_deterministic_issue(self) -> None:
@@ -329,13 +521,37 @@ class FeatureDependencyTests(unittest.TestCase):
 
 
 class PlannedDriverTests(unittest.TestCase):
-    def test_simple_single_turn_uses_planned_direct_fast_path(self) -> None:
+    def test_simple_single_turn_uses_structured_direct_plan(self) -> None:
         settings = Settings(
             lunit_fm_api_key="test",
             enable_structured_planning=True,
             enable_high_risk_review=False,
         )
-        l2 = ScriptedL2([l2_content("직접 답변")])
+        l2 = ScriptedL2(
+            [
+                l2_tool_call(
+                    "plan",
+                    "submit_response_plan",
+                    {
+                        "response_mode": "ANSWER",
+                        "risk_level": "ROUTINE",
+                        "clinical_facts": [],
+                        "interaction": {
+                            "intent": "explanation",
+                            "language": "ko",
+                            "requested_format": "",
+                            "unresolved_references": [],
+                            "strict_format": False,
+                        },
+                        "risk_signals": [],
+                        "missing_information": [],
+                        "evidence_requirements": [],
+                        "answer_obligations": ["감기를 설명한다."],
+                    },
+                ),
+                l2_content("직접 답변"),
+            ]
+        )
         driver = ConversationDriver(
             settings,
             l2=l2,  # type: ignore[arg-type]
@@ -350,7 +566,8 @@ class PlannedDriverTests(unittest.TestCase):
         )
         self.assertEqual(result.content, "직접 답변")
         self.assertEqual(result.trace["planned_lane"], "DIRECT")
-        self.assertEqual(result.trace["planner_mode"], "fast_path")
+        self.assertEqual(result.trace["planner_mode"], "structured")
+        self.assertEqual(result.trace["response_mode"], "ANSWER")
         self.assertEqual(result.trace["retrievals"], 0)
 
     def test_high_risk_plan_runs_structured_review_without_partial_trigger(self) -> None:
@@ -367,18 +584,23 @@ class PlannedDriverTests(unittest.TestCase):
                     "plan",
                     "submit_response_plan",
                     {
-                        "lane": "HIGH_RISK",
+                        "response_mode": "ANSWER",
+                        "risk_level": "HIGH",
                         "clinical_facts": [
                             {
                                 "kind": "pregnancy",
                                 "value": "pregnant",
                                 "source_turns": [1],
+                                "negated": False,
+                                "corrected": False,
                             }
                         ],
                         "interaction": {
                             "intent": "medication safety",
                             "language": "ko",
+                            "requested_format": "",
                             "unresolved_references": ["그 약"],
+                            "strict_format": False,
                         },
                         "risk_signals": [
                             {
@@ -459,12 +681,15 @@ class PlannedDriverTests(unittest.TestCase):
                     "plan",
                     "submit_response_plan",
                     {
-                        "lane": "GROUNDED",
+                        "response_mode": "ANSWER",
+                        "risk_level": "ROUTINE",
                         "clinical_facts": [],
                         "interaction": {
                             "intent": "official indication",
                             "language": "ko",
+                            "requested_format": "",
                             "unresolved_references": [],
+                            "strict_format": False,
                         },
                         "risk_signals": [],
                         "missing_information": [],

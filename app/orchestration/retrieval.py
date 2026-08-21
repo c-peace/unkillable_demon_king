@@ -158,6 +158,88 @@ def _tool_cache_key(name: str, arguments: Mapping[str, Any]) -> str:
     )
 
 
+_STOPWORDS = frozenset(
+    "a an and are as at be by for from in is of on or that the to what when with "
+    "관한 그리고 대한 대해 또는 및 에서 으로 은 는 이 가 을 를 의 와 과 에".split()
+)
+_KO_PARTICLES = (
+    "에서는",
+    "에게서",
+    "으로는",
+    "이라는",
+    "에서",
+    "에게",
+    "한테",
+    "부터",
+    "까지",
+    "으로",
+    "라는",
+    "이나",
+    "에는",
+    "은",
+    "는",
+    "이",
+    "가",
+    "을",
+    "를",
+    "의",
+    "와",
+    "과",
+    "로",
+    "도",
+    "만",
+    "에",
+)
+
+
+def _strip_particle(token: str) -> str:
+    if not token or not ("가" <= token[-1] <= "힣"):
+        return token
+    for particle in _KO_PARTICLES:
+        if len(token) > len(particle) + 1 and token.endswith(particle):
+            return token[: -len(particle)]
+    return token
+
+
+def _semantic_tokens(
+    name: str, arguments: Mapping[str, Any]
+) -> tuple[str, frozenset[str]]:
+    tokens: set[str] = set()
+    for key in sorted(arguments):
+        value = arguments[key]
+        if isinstance(value, str):
+            for raw in re.split(r"[^0-9a-z가-힣]+", value.lower()):
+                stem = _strip_particle(raw)
+                if stem and stem not in _STOPWORDS and len(stem) > 1:
+                    tokens.add(stem)
+        elif value is not None:
+            tokens.add(f"{key}={value}")
+    return name, frozenset(tokens)
+
+
+def _is_near_duplicate(
+    candidate: tuple[str, frozenset[str]],
+    seen: list[tuple[str, frozenset[str]]],
+    threshold: float = 0.85,
+) -> bool:
+    name, tokens = candidate
+    if not tokens:
+        return False
+    for seen_name, seen_tokens in seen:
+        if seen_name != name or not seen_tokens:
+            continue
+        union = len(tokens | seen_tokens)
+        if union and len(tokens & seen_tokens) / union >= threshold:
+            return True
+    return False
+
+
+def _semantic_call_key(name: str, arguments: Mapping[str, Any]) -> str:
+    """Stable diagnostic key for exact semantic-token equality."""
+    tool_name, tokens = _semantic_tokens(name, arguments)
+    return f"{tool_name}|{' '.join(sorted(tokens))}"
+
+
 def _ledger_tool_schema(
     tool: McpTool, requirement_ids: tuple[str, ...]
 ) -> dict[str, Any]:
@@ -700,7 +782,7 @@ class RetrievalEngine:
                                 ledger=ledger,
                                 registry=registry,
                                 model_rounds=model_rounds,
-                                mcp_calls=mcp_calls,
+                                mcp_calls=mcp_calls + bridge_calls,
                                 max_items=self._settings.max_evidence_items,
                             )
                             if ledger is not None
@@ -709,7 +791,7 @@ class RetrievalEngine:
                                 registry=registry,
                                 query=query_text,
                                 model_rounds=model_rounds,
-                                mcp_calls=mcp_calls,
+                                mcp_calls=mcp_calls + bridge_calls,
                                 max_items=self._settings.max_evidence_items,
                             )
                         )
@@ -742,7 +824,7 @@ class RetrievalEngine:
                         request_id=request_id,
                         round=model_rounds,
                         status=outcome.status,
-                        mcp_calls=mcp_calls,
+                        mcp_calls=mcp_calls + bridge_calls,
                         evidence_count=len(outcome.evidence),
                     )
                     return RetrievalRun(
@@ -1065,7 +1147,7 @@ class RetrievalEngine:
                                                     "adjudicated against their named requirements."
                                                 ),
                                                 model_rounds=model_rounds,
-                                                mcp_calls=mcp_calls,
+                                                mcp_calls=mcp_calls + bridge_calls,
                                             )
                                             if ledger is not None
                                             else fallback_selection(
@@ -1076,7 +1158,7 @@ class RetrievalEngine:
                                                     "the deterministic retrieval bridge."
                                                 ),
                                                 model_rounds=model_rounds,
-                                                mcp_calls=mcp_calls,
+                                                mcp_calls=mcp_calls + bridge_calls,
                                                 max_items=self._settings.max_evidence_items,
                                             )
                                         ),

@@ -52,6 +52,7 @@ SUBMIT_REVIEW_TOOL: dict[str, Any] = {
                             "instruction": {"type": "string"},
                         },
                         "required": ["category", "severity", "target_id", "instruction"],
+                        "additionalProperties": False,
                     },
                 },
             },
@@ -75,6 +76,7 @@ class ReviewResult:
     status: str
     passed: bool
     issues: tuple[ReviewIssue, ...] = ()
+    error_code: str = ""
     l2_calls: int = 0
     usage: dict[str, int] | None = None
 
@@ -202,7 +204,7 @@ class StructuredReviewer:
         del retrieval_status  # Retrieval state alone is intentionally not a trigger.
         if deterministic_issues:
             return True
-        if plan.lane == "HIGH_RISK" or plan.interaction.strict_format:
+        if plan.requires_review or plan.interaction.strict_format:
             return True
         if any(fact.corrected for fact in plan.clinical_facts):
             return True
@@ -251,14 +253,27 @@ class StructuredReviewer:
                 ],
                 deadline=deadline,
                 tools=[SUBMIT_REVIEW_TOOL],
+                tool_choice={
+                    "type": "function",
+                    "function": {"name": "submit_review"},
+                },
             )
-            if len(response.tool_calls) != 1 or response.tool_calls[0].name != "submit_review":
-                return ReviewResult(
-                    status="review_unavailable",
-                    passed=False,
-                    l2_calls=1,
-                    usage=dict(response.usage),
-                )
+        except AppError as exc:
+            return ReviewResult(
+                status="review_unavailable",
+                passed=False,
+                error_code=exc.code,
+                l2_calls=1,
+            )
+        if len(response.tool_calls) != 1 or response.tool_calls[0].name != "submit_review":
+            return ReviewResult(
+                status="review_unavailable",
+                passed=False,
+                error_code="missing_structured_call",
+                l2_calls=1,
+                usage=dict(response.usage),
+            )
+        try:
             arguments = parse_tool_arguments(response.tool_calls[0].arguments)
             parsed = _parse_review(arguments)
             return ReviewResult(
@@ -268,8 +283,19 @@ class StructuredReviewer:
                 l2_calls=1,
                 usage=dict(response.usage),
             )
-        except (AppError, TypeError, ValueError, json.JSONDecodeError):
-            return ReviewResult(status="review_unavailable", passed=False)
+        except json.JSONDecodeError:
+            error_code = "invalid_review_json"
+        except TypeError:
+            error_code = "invalid_review_types"
+        except ValueError:
+            error_code = "invalid_review_values"
+        return ReviewResult(
+            status="review_unavailable",
+            passed=False,
+            error_code=error_code,
+            l2_calls=1,
+            usage=dict(response.usage),
+        )
 
     def revise(
         self,

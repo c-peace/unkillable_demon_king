@@ -11,6 +11,55 @@ from app.errors import UpstreamError
 
 
 class L2ProtocolTests(unittest.TestCase):
+    def test_specific_tool_choice_is_forwarded_with_parallel_calls_disabled(self) -> None:
+        settings = Settings(lunit_fm_api_key="test", empty_output_retries=0)
+        response_payload = {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "plan",
+                                "type": "function",
+                                "function": {
+                                    "name": "submit_plan",
+                                    "arguments": "{}",
+                                },
+                            }
+                        ],
+                    }
+                }
+            ]
+        }
+        with patch("app.clients.l2.post_json") as post:
+            post.return_value.json.return_value = response_payload
+            L2Client(settings).complete(
+                [{"role": "user", "content": "plan"}],
+                deadline=Deadline.unbounded(),
+                tools=[
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "submit_plan",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                ],
+                tool_choice={
+                    "type": "function",
+                    "function": {"name": "submit_plan"},
+                },
+            )
+
+        payload = post.call_args.args[1]
+        self.assertEqual(
+            payload["tool_choice"],
+            {"type": "function", "function": {"name": "submit_plan"}},
+        )
+        self.assertFalse(payload["parallel_tool_calls"])
+
     def test_timeout_is_not_retried_even_when_transient_retries_are_enabled(self) -> None:
         settings = Settings(
             lunit_fm_api_key="test",

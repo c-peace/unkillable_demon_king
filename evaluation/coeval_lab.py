@@ -374,7 +374,10 @@ def run_evaluation(
     if not (coeval_root / ".venv" / "bin" / "coeval").is_file():
         raise FileNotFoundError("prepared CoEval CLI was not found")
 
-    run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + f"-{profile}"
+    run_id = (
+        datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        + f"-{profile}-{args.semantic_mode}"
+    )
     run_dir = Path(args.runs_root).resolve() / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
     image = f"lunit-harness:coeval-{run_id.lower()}"

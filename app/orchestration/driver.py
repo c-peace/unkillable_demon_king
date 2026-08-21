@@ -85,7 +85,10 @@ class ConversationDriver:
         self._settings = settings
         self._l2 = l2
         self._retrieval = retrieval
-        self._planner = StructuredPlanner(l2=l2)
+        self._planner = StructuredPlanner(
+            l2=l2,
+            retry_reserve_sec=settings.l2_timeout_sec,
+        )
         self._structured_reviewer = StructuredReviewer(settings, l2=l2)
 
     def complete(
@@ -105,6 +108,7 @@ class ConversationDriver:
         request_id: str,
         planner_mode: str = "legacy",
         fallback_reason: str = "",
+        planner_error_code: str = "",
         planning_l2_calls: int = 0,
         planning_usage: Mapping[str, int] | None = None,
         started_at: float | None = None,
@@ -117,6 +121,7 @@ class ConversationDriver:
             else Deadline.after(self._settings.request_timeout_sec)
         )
         compiled = compile_conversation(request.messages)
+        contract = extract_contract(compiled.latest_user_text)
         emit_event(
             LOGGER,
             "request_started",
@@ -127,6 +132,7 @@ class ConversationDriver:
             max_retrieval_model_rounds=self._settings.max_retrieval_model_rounds,
             max_mcp_tool_calls=self._settings.max_mcp_tool_calls,
             planner_mode=planner_mode,
+            planner_error_code=planner_error_code,
             ledger_mode="legacy",
             contract_mode="legacy",
             review_mode=(
@@ -377,7 +383,7 @@ class ConversationDriver:
 
         lane = (
             "HIGH_RISK"
-            if compiled.is_high_risk
+            if compiled.full_history_high_risk
             else "GROUNDED"
             if retrieval_count
             else "DIRECT"
@@ -389,6 +395,7 @@ class ConversationDriver:
             "lane": lane,
             "planned_lane": lane,
             "planner_mode": planner_mode,
+            "planner_error_code": planner_error_code,
             "ledger_mode": "legacy",
             "contract_mode": "legacy",
             "review_mode": (
@@ -440,6 +447,7 @@ class ConversationDriver:
                 request_id=request_id,
                 planner_mode=planning.mode,
                 fallback_reason=planning.fallback_reason,
+                planner_error_code=planning.error_code,
                 planning_l2_calls=planning.l2_calls,
                 planning_usage=planning.usage,
                 started_at=started,
@@ -467,6 +475,10 @@ class ConversationDriver:
             contract_mode=contract_mode,
             review_mode=review_mode,
             planned_lane=plan.lane,
+            response_mode=plan.response_mode,
+            risk_level=plan.risk_level,
+            retrieval_required=plan.requires_retrieval,
+            planner_error_code=planning.error_code,
             max_retrieval_model_rounds=self._settings.max_retrieval_model_rounds,
             max_mcp_tool_calls=self._settings.max_mcp_tool_calls,
         )
@@ -585,7 +597,7 @@ class ConversationDriver:
                     "content": f"ADJUDICATED EVIDENCE REPORT:\n{evidence_payload}",
                 }
             )
-        if plan.lane == "CLARIFY":
+        if plan.response_mode == "CLARIFY":
             messages.append(
                 {
                     "role": "system",
@@ -603,6 +615,8 @@ class ConversationDriver:
             round=1,
             tools_enabled=False,
             planned_lane=plan.lane,
+            response_mode=plan.response_mode,
+            risk_level=plan.risk_level,
         )
         generation_started = time.monotonic()
         response = self._l2.complete(messages, deadline=deadline, tools=None)
@@ -629,6 +643,7 @@ class ConversationDriver:
         reviewed = False
         revised = False
         review_status = "not_used"
+        review_error_code = ""
         review_issue_categories: list[str] = []
         if self._settings.enable_structured_review:
             deterministic_issues = deterministic_review_issues(
@@ -640,8 +655,14 @@ class ConversationDriver:
                 plan,
                 retrieval_status=retrieval_status,
                 deterministic_issues=deterministic_issues,
-            ) and deadline.can_start(1.0):
+            ) and deadline.can_start(self._settings.l2_timeout_sec):
                 review_started = time.monotonic()
+                emit_event(
+                    LOGGER,
+                    "review_started",
+                    request_id=request_id,
+                    review_mode="structured",
+                )
                 review = self._structured_reviewer.review(
                     compiled=compiled,
                     plan=plan,
@@ -655,10 +676,28 @@ class ConversationDriver:
                     _sum_usage(usage, review.usage)
                 reviewed = review.l2_calls > 0
                 review_status = review.status
+                review_error_code = review.error_code
                 review_issue_categories = sorted(
                     {issue.category for issue in review.issues}
                 )
-                if review.material_issues and deadline.can_start(1.0):
+                emit_event(
+                    LOGGER,
+                    "review_completed",
+                    request_id=request_id,
+                    status=review.status,
+                    error_code=review.error_code,
+                    issue_count=len(review.issues),
+                    issue_categories=review_issue_categories,
+                )
+                if review.material_issues and deadline.can_start(
+                    self._settings.l2_timeout_sec
+                ):
+                    emit_event(
+                        LOGGER,
+                        "revision_started",
+                        request_id=request_id,
+                        issue_count=len(review.material_issues),
+                    )
                     revised_draft, revision_calls, revision_usage = (
                         self._structured_reviewer.revise(
                             compiled=compiled,
@@ -673,8 +712,16 @@ class ConversationDriver:
                     _sum_usage(usage, revision_usage)
                     revised = revised_draft != draft
                     draft = revised_draft
+                    emit_event(
+                        LOGGER,
+                        "revision_completed",
+                        request_id=request_id,
+                        revised=revised,
+                    )
                 review_seconds += time.monotonic() - review_started
-        elif self._should_review(compiled, last_outcome) and deadline.can_start(1.0):
+        elif self._should_review(compiled, last_outcome) and deadline.can_start(
+            2 * self._settings.l2_timeout_sec
+        ):
             review_started = time.monotonic()
             draft, review_l2_calls, reviewed, revised, review_usage = self._review(
                 compiled,
@@ -693,12 +740,16 @@ class ConversationDriver:
             "history_hash": compiled.history_hash,
             "lane": plan.lane,
             "planned_lane": plan.lane,
+            "response_mode": plan.response_mode,
+            "risk_level": plan.risk_level,
+            "retrieval_required": plan.requires_retrieval,
             "representation": self._settings.conversation_representation,
             "planner_mode": planning.mode,
             "ledger_mode": ledger_mode,
             "contract_mode": contract_mode,
             "review_mode": review_mode,
             "fallback_reason": fallback_reason,
+            "planner_error_code": planning.error_code,
             "l2_calls": l2_calls,
             "retrieval_l2_calls": retrieval_l2_calls,
             "retrievals": 1 if plan.evidence_requirements else 0,
@@ -709,6 +760,7 @@ class ConversationDriver:
             "reviewed": reviewed,
             "revised": revised,
             "review_status": review_status,
+            "review_error_code": review_error_code,
             "review_issue_categories": review_issue_categories,
             "response_chars": len(draft),
             "generation_latency_ms": round(generation_seconds * 1000),
@@ -730,12 +782,14 @@ class ConversationDriver:
         compiled: CompiledConversation,
         outcome: RetrievalOutcome | None,
     ) -> bool:
-        # Measured on 157 requests: the audit fired on 82% of them and changed the answer
-        # on 18% of those, and the score was identical with it off (0.4946 vs 0.4944) —
-        # what it added to completeness it took back off accuracy. It cost 60% of our
-        # latency, and latency is what kills a run on the official harness. Off by default;
-        # the flag stays so the experiment can be repeated.
-        return self._settings.enable_high_risk_review
+        # A partial retrieval result is not itself a defect. In the compatibility path,
+        # reserve the broad prose reviewer for risk visible in the complete user history;
+        # structured mode uses explicit plan risk plus deterministic defect signals.
+        del outcome
+        return (
+            self._settings.enable_high_risk_review
+            and compiled.full_history_high_risk
+        )
 
     def _review(
         self,

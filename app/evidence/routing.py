@@ -199,6 +199,14 @@ class SourceRouter:
         selected = self._select_names(tuple(dict.fromkeys(names)), tools)
         return selected or self.select(fallback_query, tools)
 
+    def routes(self, query: str) -> tuple[str, ...]:
+        """Return the evidence-domain labels matched by a query."""
+        return tuple(
+            label
+            for label, (pattern, _tool_names) in zip(ROUTE_LABELS, ROUTING_RULES)
+            if pattern.search(query)
+        )
+
     def _match_tool_names(self, query: str) -> tuple[str, ...]:
         matched: list[str] = []
         for pattern, tool_names in ROUTING_RULES:
