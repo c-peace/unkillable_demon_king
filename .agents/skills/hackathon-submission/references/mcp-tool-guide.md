@@ -2,7 +2,7 @@
 
 Last updated: 2026-08-21
 
-Source: organizer "Explore Lunit MCP tools" screenshots supplied by the user on 2026-08-21.
+Source: organizer "Explore Lunit MCP tools" screenshots and copied guide text supplied by the user on 2026-08-21. The copied text reconfirmed the endpoint, authentication, timeout, prefix convention, and 21-tool catalog already captured here.
 
 ## Connection contract
 
@@ -35,6 +35,45 @@ Before starting Codex, export `LUNIT_FM_API_KEY`, then add the server configurat
 - This Codex configuration is for development. The submitted container must create its own MCP client connection and must not depend on a developer's `~/.codex/config.toml`.
 
 Other Streamable HTTP MCP clients use the same endpoint and Bearer authorization header.
+
+## Live development contract observations
+
+Observed on 2026-08-21 through the submitted application's MCP client using a runtime-injected credential. No secret or raw authorization header was retained.
+
+- MCP initialization negotiated protocol version `2025-03-26`.
+- The server exposed 21 tools through `tools/list`.
+- No `Mcp-Session-Id` response header was observed in these calls; the server operated statelessly. The client must still tolerate a future session header because Streamable HTTP permits one.
+- `tools/call` responses contained `content`, `structuredContent`, and `isError`. The tested successful calls used `isError: false` and included a text content block.
+- `index_get_page_content` returned structured source metadata plus `pages`, and a top-level `cite_uid`. Each page contained a 1-based page number and text. The evidence registry normalizes this shape while preserving the citation identifier, title, source type, and URL.
+- A general synthetic guideline request completed the full Generation -> Retrieval L2 -> MCP -> `finalize_retrieval` -> Generation path with three MCP calls and four selected evidence items.
+
+Live `tools/list` required parameters:
+
+| Tool | Required parameters observed |
+| --- | --- |
+| `rag_get_all_data_sources` | none |
+| `rag_get_data_source_detail` | `source_name` |
+| `rag_sql_query` | `db_name`, `sql` |
+| `rag_vector_query` | `collection_name`, `query` |
+| `adr_retrieve_drug_info` | `drug_name` |
+| `index_list_documents` | `corpus_tag` |
+| `index_get_document_structure` | `corpus_tag`, `node_id`, `depth` |
+| `index_get_relevant_nodes` | `corpus_tag`, `query` |
+| `index_keyword_search` | `corpus_tag`, `query` |
+| `index_get_page_content` | `corpus_tag`, `doc_id`, `start_page`, `end_page` |
+| `kcd_get_name` | `code` |
+| `kcd_search_codes` | `name` |
+| `openapi_mfds_check_drug_permission` | `drug_name` |
+| `openapi_mfds_get_drug_indication` | `drug_name` |
+| `openapi_mfds_find_drugs_by_ingredient` | `ingredient` |
+| `openapi_hira_get_drug_price` | `drug_name` |
+| `openapi_hira_disease_check_code` | `code` |
+| `openapi_law_search` | `query` |
+| `openapi_law_list_articles` | `mst` |
+| `openapi_law_get_article` | `mst`, `article_keys` |
+| `hira_updates_search` | `query` |
+
+The exact optional fields remain discoverable dynamically from `tools/list`; application code should continue to use the live schemas instead of duplicating this snapshot as executable configuration.
 
 ## Tool-selection overview
 
@@ -217,21 +256,19 @@ Known data-source identifiers:
 
 ## Verification checklist
 
-- [ ] MCP connects with runtime-injected `LUNIT_FM_API_KEY` and no secret leakage.
-- [ ] Tool discovery succeeds against the Streamable HTTP endpoint.
-- [ ] Each tool used by the harness is confirmed by its live parameter schema before implementation is finalized.
+- [x] MCP connects in the development environment with runtime-injected `LUNIT_FM_API_KEY` and no recorded secret leakage.
+- [x] Tool discovery succeeds against the Streamable HTTP endpoint and returns 21 tools.
+- [x] Live required/optional parameter schemas are obtained dynamically before tool selection.
 - [ ] The 60-second tool timeout is handled without crashing the request.
-- [ ] Retrieval stops within an explicit tool-call budget.
-- [ ] Citation identifiers and source links survive the retrieval-to-generation bridge.
+- [x] Retrieval stops within an explicit tool-call budget in unit/fake integration tests and the live guideline path.
+- [x] A live guideline `cite_uid` and source metadata survived MCP parsing, evidence registration, selection, and generation packaging.
 - [ ] Tool failures yield bounded retries or a `partial`/`no_evidence` outcome.
-- [ ] No submitted runtime path depends on the developer's Codex MCP configuration.
+- [x] No submitted runtime path depends on the developer's Codex MCP configuration.
 
 ## Still unresolved
 
-- Exact input schema and required parameters for each tool
-- Exact response schema, pagination shape, error codes, and retry semantics
-- Which tools and results provide `cite_uid`
+- Complete response, pagination, and `cite_uid` coverage across all 21 tools
+- Live error codes, retry semantics, and timeout behavior
 - Evaluation-time MCP connectivity and credential injection
 - Rate and concurrency limits
 - Whether the catalog or corpus document counts will change during the hackathon
-
