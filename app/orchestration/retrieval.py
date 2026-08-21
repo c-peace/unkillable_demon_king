@@ -417,6 +417,9 @@ class RetrievalEngine:
         mcp_budget_exhausted = False
         tool_cache: dict[str, str] = {}
         tool_use_counts: dict[str, int] = {}
+        # The deterministic page bridge is our own chaining, not the model spending its
+        # budget, so it is counted separately and reported without charging the model.
+        bridge_calls = 0
 
         while model_rounds < self._settings.max_retrieval_model_rounds:
             if not deadline.can_start(0.25):
@@ -491,7 +494,7 @@ class RetrievalEngine:
                             registry=registry,
                             query=query,
                             model_rounds=model_rounds,
-                            mcp_calls=mcp_calls,
+                            mcp_calls=mcp_calls + bridge_calls,
                             max_items=self._settings.max_evidence_items,
                         )
                     except (ValueError, json.JSONDecodeError) as exc:
@@ -645,7 +648,7 @@ class RetrievalEngine:
                                     page_arguments,
                                     deadline=deadline,
                                 )
-                                mcp_calls += 1
+                                bridge_calls += 1
                                 tool_use_counts[page_content_tool.name] = (
                                     tool_use_counts.get(page_content_tool.name, 0) + 1
                                 )
@@ -682,8 +685,12 @@ class RetrievalEngine:
                                 # The deterministic bridge grabs the first plausible page, which
                                 # may be off-topic. Short-circuit only when no budget remains to
                                 # verify or extend it; otherwise let the model judge sufficiency.
+                                # The model keeps its full tool-call allowance, but whether
+                                # there is room to carry on is about work actually done, so
+                                # this check counts the bridge's own call too.
                                 bridge_budget_left = (
-                                    mcp_calls < self._settings.max_mcp_tool_calls
+                                    mcp_calls + bridge_calls
+                                    < self._settings.max_mcp_tool_calls
                                     and model_rounds
                                     < self._settings.max_retrieval_model_rounds - 1
                                 )
@@ -697,14 +704,14 @@ class RetrievalEngine:
                                                 "the deterministic retrieval bridge."
                                             ),
                                             model_rounds=model_rounds,
-                                            mcp_calls=mcp_calls,
+                                            mcp_calls=mcp_calls + bridge_calls,
                                             max_items=self._settings.max_evidence_items,
                                         ),
                                         usage=usage,
                                         l2_calls=model_rounds,
                                     )
                             except AppError as exc:
-                                mcp_calls += 1
+                                bridge_calls += 1
                                 tool_use_counts[page_content_tool.name] = (
                                     tool_use_counts.get(page_content_tool.name, 0) + 1
                                 )
@@ -760,7 +767,7 @@ class RetrievalEngine:
                 query=query,
                 note=note,
                 model_rounds=model_rounds,
-                mcp_calls=mcp_calls,
+                mcp_calls=mcp_calls + bridge_calls,
                 max_items=self._settings.max_evidence_items,
             ),
             usage=usage,
