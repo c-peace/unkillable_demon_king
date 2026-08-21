@@ -116,7 +116,7 @@ class Settings:
     mcp_protocol_version: str = "2025-03-26"
     mcp_tool_mode: str = "family"
     enable_mcp: bool = True
-    enable_high_risk_review: bool = True
+    enable_high_risk_review: bool = False
     conversation_representation: str = "native"
 
     @classmethod
@@ -231,7 +231,7 @@ class Settings:
             mcp_tool_mode=tool_mode,
             enable_mcp=_as_bool(source.get("ENABLE_MCP"), True),
             enable_high_risk_review=_as_bool(
-                source.get("ENABLE_HIGH_RISK_REVIEW"), True
+                source.get("ENABLE_HIGH_RISK_REVIEW"), False
             ),
             conversation_representation=representation,
         )
