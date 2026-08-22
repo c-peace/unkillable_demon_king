@@ -1,46 +1,63 @@
 ---
 name: hackathon-submission
-description: Maintain and apply the Lunit medical foundation-model hackathon requirements, evolving project context, evaluator contract, and final submission checklist. Use when planning, implementing, testing, reviewing, or submitting this hackathon project, or when the user provides new organizer information.
+description: Apply Lunit hackathon rules and project context for evaluator behavior, L2/MCP harness architecture, submission packaging, dashboard analysis, or new organizer evidence. Do not invoke for routine local edits, tests, explanations, or Git operations whose outcome is already determined by the code.
 ---
 
 # Hackathon Submission
 
-Treat the organizer's confirmed requirements as hard acceptance criteria throughout the project.
+Apply confirmed organizer requirements as hard constraints without loading unrelated project history.
 
-## Load the right context
+## Fast path
 
-1. Always read [references/current-state.md](references/current-state.md) first for the active phase, verified progress, blockers, and next actions.
-2. Read [references/project-brief.md](references/project-brief.md) for the durable goal, supplied infrastructure, decisions, and unresolved questions.
-3. Read [references/rules-and-evaluation.md](references/rules-and-evaluation.md) before making model, data-source, networking, harness, benchmark, or award-track decisions.
-4. Read [references/healthbench-overview.md](references/healthbench-overview.md) before benchmark interpretation, evaluation analysis, prompt-quality strategy, or model-quality decisions. Preserve its anti-reverse-engineering boundary.
-5. Read [references/simple-evals-reference.md](references/simple-evals-reference.md) before changing the evaluator adapter, response strategy, score interpretation, HealthBench experiments, or RAG/harness architecture.
-6. Read [references/advanced-harness-design.md](references/advanced-harness-design.md) before implementing or materially changing conversation-state compilation, execution lanes, retrieval routing, evidence verification, review/revision, observability, or the harness experiment plan.
-7. Read [references/literature-synthesis.md](references/literature-synthesis.md) before adopting an agent role, clinical schema, retrieval loop, confidence mechanism, safety gate, response verifier, source-curation policy, or paper-reported benchmark result.
-8. Read [references/l2-usage-guide.md](references/l2-usage-guide.md) before designing or changing L2 prompts, retrieval/generation orchestration, MCP exposure, citations, or multi-turn handling.
-9. Read [references/api-and-patient-simulator.md](references/api-and-patient-simulator.md) before implementing L2 API calls, authentication, environment configuration, Patient Simulator tests, or retry behavior.
-10. Read [references/mcp-tool-guide.md](references/mcp-tool-guide.md) before configuring MCP, selecting retrieval tools or data sources, implementing the MCP client, or changing retrieval routing.
-11. Read [references/submission-spec.md](references/submission-spec.md) before changing the service boundary, API behavior, Docker setup, branch strategy, evaluation flow, or submission process.
-12. Re-read all eleven references before claiming the project is ready for evaluation or final submission.
+Read only this file first. Then open the smallest reference set that can change the decision;
+normally that is one file and rarely more than two. Use code and tests as the source of truth for
+implementation details. Do not load references for a routine edit whose requirements are already
+clear from the code.
 
-## Maintain the project knowledge
+## Reference router
 
-When the user provides new organizer material, API/MCP documentation, evaluation feedback, or a team decision:
+- Active objective, blocker, handoff, or latest verified baseline:
+  [current-state.md](references/current-state.md)
+- Organizer rules, allowed models/data/network, benchmark boundaries:
+  [rules-and-evaluation.md](references/rules-and-evaluation.md)
+- Docker, API surface, branch, SHA, or submission procedure:
+  [submission-spec.md](references/submission-spec.md)
+- HealthBench interpretation or score meaning:
+  [healthbench-overview.md](references/healthbench-overview.md); add
+  [simple-evals-reference.md](references/simple-evals-reference.md) only for evaluator mechanics
+- L2 request/tool-call/prompt behavior:
+  [l2-usage-guide.md](references/l2-usage-guide.md)
+- L2 authentication, timeout/retry, or Patient Simulator:
+  [api-and-patient-simulator.md](references/api-and-patient-simulator.md)
+- MCP schema, source selection, or protocol behavior:
+  [mcp-tool-guide.md](references/mcp-tool-guide.md)
+- Material harness architecture change:
+  [advanced-harness-design.md](references/advanced-harness-design.md)
+- Adopting or disputing a paper-derived design:
+  [literature-synthesis.md](references/literature-synthesis.md)
+- Durable project background not covered above:
+  [project-brief.md](references/project-brief.md)
 
-- Update the relevant reference in the same turn when file changes are authorized by the request.
-- Separate confirmed facts, team decisions, working assumptions, and unresolved questions.
-- Record the source and date for externally supplied requirements when available.
-- Preserve meaningful superseded requirements with a short note instead of silently erasing the conflict.
-- Never store access tokens, API keys, credentials, patient data, or other secrets in the skill. Record only the environment-variable name or secret-delivery mechanism.
-- Do not promote examples from organizer material into requirements unless they are explicitly stated as mandatory.
-- After a material decision, implementation milestone, verification result, blocker, or next-action change, update `current-state.md` in the same turn.
-- Keep `current-state.md` concise. Move stable facts into the focused reference that owns them and retain only the current implication or pointer in the state file.
+## Invariants
 
-## Apply the knowledge
+- Every returned user-facing answer is generated by Lunit L2.
+- The request `messages` remain the authoritative conversation state.
+- Evaluation must not depend on public internet services or the Patient Simulator.
+- Do not reconstruct hidden HealthBench items, rubrics, or answer keys.
+- Keep unknown evaluator/L2/MCP behavior configurable until confirmed.
+- Never store credentials, patient data, raw authorization, or secrets in project knowledge files,
+  source, tests, Docker history, or logs. Record only variable names and delivery mechanisms.
 
-- Map implementation and verification work back to confirmed requirements.
-- Prefer evaluator compatibility and a reliable end-to-end path; add advanced modules incrementally and keep them independently ablatable even when development time is ample.
-- Ensure the final user-facing output is generated by Lunit L2 and the evaluation path has no dependency on external network access.
-- Keep unknown protocol details configurable until organizer documentation resolves them.
-- Before submission, verify every item in the checklist in `submission-spec.md` with actual commands and request/response evidence.
-- Record completed verification commands and observed results in `current-state.md`; never mark planned verification as completed.
-- Report remaining unknowns and unverified items explicitly; do not infer that an OpenAI-compatible endpoint supports unspecified optional features.
+## State maintenance
+
+Update `current-state.md` once per turn only for a material objective, architecture, blocker,
+published baseline, evaluation result, or next-action change. Keep only the latest evidence summary;
+Git history owns chronology. Routine tests, repeated checks, and ordinary commits do not require a
+state update.
+
+When new organizer evidence arrives, update the focused reference that owns it. Separate confirmed
+facts, decisions, assumptions, and unknowns; preserve meaningful superseded facts.
+
+For a final submission-readiness claim, read `current-state.md`, `rules-and-evaluation.md`, and
+`submission-spec.md`, then inspect only references for interfaces changed since the last verified
+baseline. Run the checklist with actual commands and report unverified items explicitly.

@@ -1,32 +1,28 @@
 # Lunit Hackathon Workspace
 
-This workspace uses the repo-scoped `$hackathon-submission` skill as its durable source of project knowledge.
+Use the repo-scoped `$hackathon-submission` skill only when work depends on hackathon rules,
+evaluation behavior, L2/MCP architecture, submission packaging, or new organizer evidence.
+For a narrow code edit, test, explanation, or Git operation, inspect the relevant code directly.
 
 ## Context bootstrap
 
-Before any planning, implementation, testing, evaluation, or submission work:
+When the skill applies, read its `SKILL.md` and only the references selected by its router.
+Read `current-state.md` when the task needs the active objective, handoff, blocker, or verified
+baseline. Never preload the whole reference directory.
 
-1. Read `.agents/skills/hackathon-submission/SKILL.md` completely.
-2. Read `.agents/skills/hackathon-submission/references/current-state.md` for the active phase, verified progress, blockers, and next actions.
-3. Follow the skill's routing instructions to read only the additional references relevant to the task.
-
-Treat the reference files as the source of truth when chat history or a compacted summary differs from them. Newer organizer evidence supersedes older assumptions; record the change rather than silently overwriting a meaningful conflict.
+Newer organizer evidence supersedes older assumptions. Preserve a meaningful conflict instead of
+silently rewriting it.
 
 ## State updates
 
-Update `current-state.md` in the same turn after any of the following:
-
-- a material architecture or product decision;
-- an implementation milestone;
-- a build, test, dashboard trial, or evaluation result;
-- discovery of a blocker, failed assumption, or new organizer requirement;
-- a change to the immediate next actions.
-
-Keep the file concise and factual. Record commands and observed results, not intended results. Move stable organizer facts into the relevant focused reference and leave only a short pointer in current state.
+Update `current-state.md` once near the end of a turn only when the active objective, architecture,
+blockers, published baseline, or immediate next actions materially change. Do not append routine
+passing tests, repeated Git checks, or a chronological transcript. Move stable facts to the focused
+reference that owns them.
 
 ## Safety
 
 Never store API keys, credentials, patient data, or other secrets in `AGENTS.md`, `.omx/notepad.md`, the skill, its references, source code, Docker layers, tests, or logs. Store only environment-variable names and secret-delivery mechanisms.
 
-Before claiming readiness, re-run the verification required by the skill and update `current-state.md` with the evidence.
-
+Before claiming submission readiness, run the verification routed by the skill and record only the
+latest evidence summary.
